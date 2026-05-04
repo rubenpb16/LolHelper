@@ -1,0 +1,18 @@
+# Credenciales — NUNCA subir esto a git
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Logs
+*.log
+lol_tracker.log
+
+# Sistema
+.DS_Store
+Thumbs.db
