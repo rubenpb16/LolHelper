@@ -40,7 +40,7 @@ from psycopg2.extras import RealDictCursor
 import bcrypt as _bcrypt
 from jose import jwt, JWTError
 from config import JWT_SECRET, JWT_ALGO, JWT_MINUTOS, CORS_ORIGINS
-from db import get_db_api, _pool
+from db import get_db_api, _get_pool
 from lol_logger import get_logger
 
 log = get_logger("api")
@@ -1440,9 +1440,10 @@ def sync_me(usuario = Depends(get_usuario_actual), db = Depends(get_db)):
 def health():
     db_status = "ok"
     try:
-        conn = _pool.getconn()
+        pool = _get_pool()
+        conn = pool.getconn()
         conn.cursor().execute("SELECT 1")
-        _pool.putconn(conn)
+        pool.putconn(conn)
     except Exception as e:
         db_status = f"error: {e}"
 
