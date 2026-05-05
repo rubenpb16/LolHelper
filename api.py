@@ -29,10 +29,12 @@ from fastapi import FastAPI, HTTPException, Depends, status, Response, Cookie, R
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
+from contextlib import asynccontextmanager
 from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional
 from datetime import datetime, date, timedelta
 import time
+import threading
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import bcrypt as _bcrypt
@@ -42,6 +44,35 @@ from db import get_db_api, _pool
 from lol_logger import get_logger
 
 log = get_logger("api")
+
+
+def _scheduler_loop():
+    """Ejecuta el ciclo de sync + alertas cada 5 minutos en un hilo de fondo."""
+    import alertas as modulo_alertas
+    import email_service as modulo_email
+    from extractor import sync_todos
+
+    INTERVALO = 5 * 60  # segundos
+    log.info("Scheduler integrado arrancado (ciclos cada 5 min)")
+
+    while True:
+        try:
+            sync_todos()
+        except Exception as e:
+            log.error(f"Scheduler — error en sync: {e}")
+        try:
+            modulo_alertas.procesar_alertas_todos(modulo_email)
+        except Exception as e:
+            log.error(f"Scheduler — error en alertas: {e}")
+        time.sleep(INTERVALO)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Hilo daemon: muere automáticamente cuando el proceso principal para
+    t = threading.Thread(target=_scheduler_loop, daemon=True)
+    t.start()
+    yield
 # ══════════════════════════════════════════════════════════════
 #  CONFIGURACIÓN
 # ══════════════════════════════════════════════════════════════
@@ -54,6 +85,7 @@ app = FastAPI(
     title="LolHelper API",
     description="API para el seguimiento de tiempo de juego en League of Legends",
     version="1.0.0",
+    lifespan=lifespan,
 )
  
 # CORS — orígenes configurables via CORS_ORIGINS en .env / Railway
