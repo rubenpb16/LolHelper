@@ -113,13 +113,17 @@ async def log_requests(request: Request, call_next):
 COOKIE_MAX_AGE = JWT_MINUTOS * 60  # segundos
 
 def set_auth_cookie(response: Response, token: str):
+    # Cross-origin (frontend y API en dominios distintos) requiere
+    # SameSite=None + Secure=True para que el navegador envíe la cookie.
+    # En local (HTTP) usamos SameSite=Lax porque Secure no está disponible.
+    _https = len(CORS_ORIGINS) > 0 and CORS_ORIGINS[0].startswith("https")
     response.set_cookie(
         key="token",
         value=token,
         httponly=True,
         max_age=COOKIE_MAX_AGE,
-        samesite="lax",
-        secure=len(CORS_ORIGINS) > 0 and CORS_ORIGINS[0].startswith("https"),
+        samesite="none" if _https else "lax",
+        secure=_https,
     )
 
 # ══════════════════════════════════════════════════════════════
