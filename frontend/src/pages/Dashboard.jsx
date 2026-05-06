@@ -67,7 +67,7 @@ export default function Dashboard() {
 
     const recent = data.ultimas_partidas.slice(0, 3)
     const allLosses      = recent.length >= 3 && recent.every(p => p.resultado !== 'Victoria')
-    const manySurrenders = recent.filter(p => p.rendicion).length >= 2
+    const manySurrenders = recent.filter(p => p.rendicion_negativa).length >= 2
 
     if (allLosses) {
       setTiltType('losses')
@@ -258,7 +258,7 @@ export default function Dashboard() {
         {hoy.partidas > 0 && (
           <div style={{ display: 'flex', gap: 16, marginTop: 14, fontSize: 13, color: 'var(--muted)' }}>
             <span>{hoy.partidas} partidas</span>
-            {hoy.rendiciones > 0 && <span style={{ color: 'var(--warning)' }}>🏳 {hoy.rendiciones} rendiciones</span>}
+            {hoy.rendiciones > 0 && <span style={{ color: 'var(--warning)' }}>🏳 {hoy.rendiciones} rendici{hoy.rendiciones === 1 ? 'ón' : 'ones'} prop{hoy.rendiciones === 1 ? 'ia' : 'ias'}</span>}
             {hoy.afks > 0        && <span style={{ color: 'var(--danger)'  }}>💤 {hoy.afks} AFK</span>}
             {hoy.campeon         && <span>· {hoy.campeon}</span>}
           </div>
@@ -326,7 +326,8 @@ export default function Dashboard() {
                   <div>
                     <span style={{ fontSize: 14, fontWeight: 500 }}>{p.campeon}</span>
                     <span style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 8 }}>{p.modo}</span>
-                    {p.rendicion && <span style={{ fontSize: 11, marginLeft: 6 }}>🏳</span>}
+                    {p.rendicion_negativa && <span style={{ fontSize: 11, marginLeft: 6 }} title="Tu equipo rindió">🏳</span>}
+                    {p.rendicion_positiva && <span style={{ fontSize: 11, marginLeft: 6 }} title="El rival rindió">🤝</span>}
                     {p.afk       && <span style={{ fontSize: 11, marginLeft: 4 }}>💤</span>}
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>

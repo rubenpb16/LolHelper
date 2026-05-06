@@ -24,18 +24,16 @@ import requests
 import psycopg2
 from psycopg2.extras import execute_values
 from datetime import datetime, timedelta, date
-from config import RIOT_API_KEY as API_KEY
+from config import RIOT_API_KEY as API_KEY, SYNC_DIAS_INICIAL
 from db import get_db
 # ══════════════════════════════════════════════════════════════
 #  CONFIGURACIÓN
 # ══════════════════════════════════════════════════════════════
 
-# Rate limit conservador para Development Key
-# Dev Key: 20 req/s, 100 req/2min → esperamos 1.3s entre llamadas
-SLEEP_ENTRE_REQUESTS    = 1.3      # Con Production Key podemos ir más rápido
+SLEEP_ENTRE_REQUESTS    = 1.3       # Con Production Key (100 req/s) es suficiente
 SLEEP_ENTRE_USUARIOS    = 1.0
 MAX_PARTIDAS_POR_PAGINA = 100       # Máximo por llamada que permite la API
-DIAS_ATRAS_DEFAULT      = 365        # Carga inicial: últimos 60 días (manejable)
+DIAS_ATRAS_DEFAULT      = SYNC_DIAS_INICIAL   # Configurable via env SYNC_DIAS_INICIAL
 DIAS_VENTANA_PAGINACION = 30        # Tamaño de cada ventana al paginar
 
 

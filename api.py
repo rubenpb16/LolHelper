@@ -39,7 +39,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import bcrypt as _bcrypt
 from jose import jwt, JWTError
-from config import JWT_SECRET, JWT_ALGO, JWT_MINUTOS, CORS_ORIGINS
+from config import JWT_SECRET, JWT_ALGO, JWT_MINUTOS, CORS_ORIGINS, SYNC_INTERVALO_MIN
 from db import get_db_api, _get_pool
 from lol_logger import get_logger
 
@@ -47,24 +47,46 @@ log = get_logger("api")
 
 
 def _scheduler_loop():
-    """Ejecuta el ciclo de sync + alertas cada 5 minutos en un hilo de fondo."""
+    """
+    Fase 1 — Carga histórica inicial (bloqueante):
+        Extrae hasta SYNC_DIAS_INICIAL días de historial para cada usuario que
+        aún no tiene partidas en la BD. Solo se ejecuta una vez al arrancar.
+
+    Fase 2 — Ciclo periódico (cada SYNC_INTERVALO_MIN minutos):
+        Sync incremental: solo descarga partidas nuevas desde la última fecha
+        registrada. Procesa alertas al terminar cada ciclo.
+    """
     import alertas as modulo_alertas
     import email_service as modulo_email
     from extractor import sync_todos
 
-    INTERVALO = 5 * 60  # segundos
-    log.info("Scheduler integrado arrancado (ciclos cada 5 min)")
+    INTERVALO = SYNC_INTERVALO_MIN * 60
 
+    # ── FASE 1: carga histórica inicial ──────────────────────────
+    log.info("Scheduler — FASE 1: iniciando carga histórica inicial…")
+    try:
+        sync_todos()
+        log.info("Scheduler — FASE 1 completada. Iniciando ciclo periódico.")
+    except Exception as e:
+        log.error(f"Scheduler — error en carga inicial: {e}")
+
+    try:
+        modulo_alertas.procesar_alertas_todos(modulo_email)
+    except Exception as e:
+        log.error(f"Scheduler — error en alertas post-carga: {e}")
+
+    # ── FASE 2: ciclo periódico ───────────────────────────────────
+    log.info(f"Scheduler — FASE 2: ciclo periódico cada {SYNC_INTERVALO_MIN} min")
     while True:
+        time.sleep(INTERVALO)
         try:
             sync_todos()
         except Exception as e:
-            log.error(f"Scheduler — error en sync: {e}")
+            log.error(f"Scheduler — error en sync periódico: {e}")
         try:
             modulo_alertas.procesar_alertas_todos(modulo_email)
         except Exception as e:
             log.error(f"Scheduler — error en alertas: {e}")
-        time.sleep(INTERVALO)
 
 
 @asynccontextmanager
@@ -475,7 +497,7 @@ def dashboard(usuario = Depends(get_usuario_actual), db = Depends(get_db)):
         SELECT
             COALESCE(ROUND(SUM(duracion_min)::numeric / 60, 2), 0)   AS horas_hoy,
             COALESCE(COUNT(*), 0)                                      AS partidas_hoy,
-            COALESCE(SUM(CASE WHEN rendicion THEN 1 ELSE 0 END), 0)   AS rendiciones_hoy,
+            COALESCE(SUM(CASE WHEN rendicion AND resultado = 'Derrota'  THEN 1 ELSE 0 END), 0) AS rendiciones_hoy,
             COALESCE(SUM(CASE WHEN NOT apto_para_progresion THEN 1 ELSE 0 END), 0) AS afks_hoy,
             MODE() WITHIN GROUP (ORDER BY campeon)                     AS campeon_hoy
         FROM partidas
@@ -595,7 +617,9 @@ def dashboard(usuario = Depends(get_usuario_actual), db = Depends(get_db)):
                 "resultado":  r["resultado"],
                 "kda":        float(r["kda"] or 0),
                 "duracion_min": float(r["duracion_min"]),
-                "rendicion":  r["rendicion"],
+                "rendicion":          r["rendicion"],
+                "rendicion_negativa": r["rendicion"] and r["resultado"] == "Derrota",
+                "rendicion_positiva": r["rendicion"] and r["resultado"] == "Victoria",
                 "afk":        not r["apto_para_progresion"],
                 "fecha":      str(r["fecha"]),
             }
@@ -673,10 +697,11 @@ def historial(
             ROUND(AVG(kda)::numeric, 2)                                AS kda_avg,
             ROUND(AVG(cs_por_minuto)::numeric, 2)                      AS cs_avg,
             ROUND(AVG(dano_total_campeon)::numeric)                    AS dano_avg,
-            SUM(CASE WHEN resultado = 'Victoria' THEN 1 ELSE 0 END)   AS victorias,
-            SUM(CASE WHEN rendicion THEN 1 ELSE 0 END)                AS rendiciones,
-            SUM(CASE WHEN NOT apto_para_progresion THEN 1 ELSE 0 END) AS afks,
-            COUNT(DISTINCT fecha)                                       AS dias_jugados
+            SUM(CASE WHEN resultado = 'Victoria' THEN 1 ELSE 0 END)                          AS victorias,
+            SUM(CASE WHEN rendicion AND resultado = 'Derrota'  THEN 1 ELSE 0 END)           AS rendiciones,
+            SUM(CASE WHEN rendicion AND resultado = 'Victoria' THEN 1 ELSE 0 END)           AS rendiciones_pos,
+            SUM(CASE WHEN NOT apto_para_progresion THEN 1 ELSE 0 END)                       AS afks,
+            COUNT(DISTINCT fecha)                                                             AS dias_jugados
         FROM partidas
         WHERE puuid = %s AND fecha >= %s AND fecha <= %s
     """, rango)
@@ -697,7 +722,7 @@ def historial(
                 fecha,
                 ROUND(SUM(duracion_min)::numeric / 60, 2) AS horas,
                 COUNT(*) AS partidas,
-                SUM(CASE WHEN rendicion THEN 1 ELSE 0 END) AS rendiciones,
+                SUM(CASE WHEN rendicion AND resultado = 'Derrota' THEN 1 ELSE 0 END) AS rendiciones,
                 SUM(CASE WHEN NOT apto_para_progresion THEN 1 ELSE 0 END) AS afks,
                 MODE() WITHIN GROUP (ORDER BY campeon) AS campeon
             FROM partidas
@@ -749,7 +774,9 @@ def historial(
                 "cs_min":      float(r["cs_por_minuto"] or 0),
                 "dano":        r["dano_total_campeon"],
                 "vision":      r["vision_score"],
-                "rendicion":   r["rendicion"],
+                "rendicion":          r["rendicion"],
+                "rendicion_negativa": r["rendicion"] and r["resultado"] == "Derrota",
+                "rendicion_positiva": r["rendicion"] and r["resultado"] == "Victoria",
                 "afk":         not r["apto_para_progresion"],
                 "tiempo_muerto_seg": r["tiempo_muerto_seg"],
                 "parche":      r["parche"],
@@ -837,14 +864,15 @@ def stats_comportamiento(
     cur.execute("""
         SELECT
             COUNT(*)                                                      AS total_partidas,
-            SUM(CASE WHEN rendicion THEN 1 ELSE 0 END)                   AS total_rendiciones,
+            SUM(CASE WHEN rendicion AND resultado = 'Derrota'  THEN 1 ELSE 0 END) AS total_rendiciones,
+            SUM(CASE WHEN rendicion AND resultado = 'Victoria' THEN 1 ELSE 0 END) AS total_rendiciones_pos,
             SUM(CASE WHEN rendicion_temprana THEN 1 ELSE 0 END)          AS rendiciones_tempranas,
             SUM(CASE WHEN NOT apto_para_progresion THEN 1 ELSE 0 END)    AS afks,
             ROUND(AVG(tiempo_muerto_seg)::numeric / 60, 1)               AS avg_min_muerto,
             ROUND(AVG(duracion_min)::numeric, 1)                         AS avg_duracion,
             SUM(CASE WHEN resultado = 'Victoria' THEN 1 ELSE 0 END)      AS victorias,
             ROUND(
-                SUM(CASE WHEN rendicion THEN 1 ELSE 0 END)::numeric
+                SUM(CASE WHEN rendicion AND resultado = 'Derrota' THEN 1 ELSE 0 END)::numeric
                 / NULLIF(COUNT(*), 0) * 100
             , 1)                                                          AS pct_rendiciones,
             ROUND(AVG(kda)::numeric, 2)                                  AS kda_avg,
@@ -866,7 +894,8 @@ def stats_comportamiento(
             DATE_TRUNC('week', fecha)::date                            AS semana,
             ROUND(SUM(duracion_min)::numeric / 60, 2)                  AS horas,
             COUNT(*)                                                    AS partidas,
-            SUM(CASE WHEN rendicion THEN 1 ELSE 0 END)                 AS rendiciones
+            SUM(CASE WHEN rendicion AND resultado = 'Derrota'  THEN 1 ELSE 0 END) AS rendiciones,
+            SUM(CASE WHEN rendicion AND resultado = 'Victoria' THEN 1 ELSE 0 END) AS rendiciones_pos
         FROM partidas
         WHERE puuid = %s AND fecha >= %s
         GROUP BY DATE_TRUNC('week', fecha)
@@ -1111,7 +1140,8 @@ def stats_analisis(
             ROUND(AVG(kda)::numeric, 2)                                             AS kda_avg,
             ROUND(SUM(CASE WHEN resultado='Victoria' THEN 1 ELSE 0 END)::numeric
                   / NULLIF(COUNT(*),0) * 100, 0)                                    AS winrate_pct,
-            SUM(CASE WHEN rendicion THEN 1 ELSE 0 END)                              AS rendiciones,
+            SUM(CASE WHEN rendicion AND resultado = 'Derrota'  THEN 1 ELSE 0 END) AS rendiciones,
+            SUM(CASE WHEN rendicion AND resultado = 'Victoria' THEN 1 ELSE 0 END) AS rendiciones_pos,
             SUM(CASE WHEN NOT apto_para_progresion THEN 1 ELSE 0 END)               AS afks,
             MODE() WITHIN GROUP (ORDER BY campeon)                                  AS campeon_principal
         FROM with_session
@@ -1156,7 +1186,7 @@ def stats_analisis(
             ROUND(SUM(CASE WHEN resultado='Victoria' THEN 1 ELSE 0 END)::numeric
                   / NULLIF(COUNT(*),0) * 100, 0)                            AS winrate_pct,
             ROUND(AVG(dano_total_campeon)::numeric)                         AS dano_avg,
-            ROUND(SUM(CASE WHEN rendicion THEN 1 ELSE 0 END)::numeric
+            ROUND(SUM(CASE WHEN rendicion AND resultado = 'Derrota' THEN 1 ELSE 0 END)::numeric
                   / NULLIF(COUNT(*),0) * 100, 0)                            AS pct_rendicion
         FROM numbered
         GROUP BY LEAST(pos::int, 6)
@@ -1173,7 +1203,7 @@ def stats_analisis(
             ROUND(AVG(kda)::numeric, 2)                                     AS kda_avg,
             ROUND(SUM(CASE WHEN resultado='Victoria' THEN 1 ELSE 0 END)::numeric
                   / NULLIF(COUNT(*),0) * 100, 0)                            AS winrate_pct,
-            ROUND(SUM(CASE WHEN rendicion THEN 1 ELSE 0 END)::numeric
+            ROUND(SUM(CASE WHEN rendicion AND resultado = 'Derrota' THEN 1 ELSE 0 END)::numeric
                   / NULLIF(COUNT(*),0) * 100, 0)                            AS pct_rendicion,
             ROUND(AVG(dano_total_campeon)::numeric)                         AS dano_avg
         FROM partidas
@@ -1191,7 +1221,7 @@ def stats_analisis(
             ROUND(AVG(kda)::numeric, 2)                                     AS kda_avg,
             ROUND(SUM(CASE WHEN resultado='Victoria' THEN 1 ELSE 0 END)::numeric
                   / NULLIF(COUNT(*),0) * 100, 0)                            AS winrate_pct,
-            ROUND(SUM(CASE WHEN rendicion THEN 1 ELSE 0 END)::numeric
+            ROUND(SUM(CASE WHEN rendicion AND resultado = 'Derrota' THEN 1 ELSE 0 END)::numeric
                   / NULLIF(COUNT(*),0) * 100, 0)                            AS pct_rendicion,
             ROUND(AVG(cs_por_minuto)::numeric, 2)                           AS cs_min_avg
         FROM partidas
@@ -1254,8 +1284,10 @@ def stats_analisis(
                      THEN 1 ELSE 0 END)::float
                 / NULLIF(COUNT(*),0)                                             AS pct_nocturno,
             ROUND(AVG(kda)::numeric, 2)                                          AS kda_global,
-            ROUND(SUM(CASE WHEN rendicion THEN 1 ELSE 0 END)::numeric
+            ROUND(SUM(CASE WHEN rendicion AND resultado = 'Derrota' THEN 1 ELSE 0 END)::numeric
                   / NULLIF(COUNT(*),0) * 100, 1)                                 AS pct_rendicion,
+            ROUND(SUM(CASE WHEN rendicion AND resultado = 'Victoria' THEN 1 ELSE 0 END)::numeric
+                  / NULLIF(COUNT(*),0) * 100, 1)                                 AS pct_rendicion_pos,
             SUM(CASE WHEN NOT apto_para_progresion THEN 1 ELSE 0 END)            AS total_afks
         FROM partidas
         WHERE puuid = %(puuid)s AND fecha >= %(fecha_ini)s AND fecha <= %(fecha_fin)s
@@ -1294,8 +1326,9 @@ def stats_analisis(
     # ── Python: construir perfil, flags y score ───────────────
     pct_finde     = float(row_stats.get("pct_finde",     0) or 0)
     pct_nocturno  = float(row_stats.get("pct_nocturno",  0) or 0)
-    pct_rendicion = float(row_stats.get("pct_rendicion", 0) or 0)
-    kda_global    = float(row_stats.get("kda_global",    0) or 0)
+    pct_rendicion     = float(row_stats.get("pct_rendicion",     0) or 0)
+    pct_rendicion_pos = float(row_stats.get("pct_rendicion_pos", 0) or 0)
+    kda_global        = float(row_stats.get("kda_global",        0) or 0)
     total_afks    = int(row_stats.get("total_afks",      0) or 0)
     total_dias    = max(int(row_stats.get("dias_jugados", 1) or 1), 1)
     ses_mas_3h    = int(resumen_sesiones.get("sesiones_mas_3h", 0) or 0)
@@ -1389,13 +1422,13 @@ def stats_analisis(
 
     if pct_rendicion >= 35:
         flags.append({"tipo": "negativo", "nivel": "danger", "icono": "🏳️",
-            "titulo": "Alta tasa de rendición",
-            "texto": f"Te rindes en el {pct_rendicion:.0f}% de tus partidas. Una tasa tan alta indica frustración acumulada — considera pausas entre partidas.",
-            "metrica": f"{pct_rendicion:.0f}%"})
+            "titulo": "Alta tasa de rendición negativa",
+            "texto": f"Tu equipo rindió en el {pct_rendicion:.0f}% de tus derrotas. Una tasa tan alta es indicador claro de frustración acumulada — el tilt está afectando a tu juego. Considera pausas activas entre partidas.",
+            "metrica": f"{pct_rendicion:.0f}% derrotas"})
     elif pct_rendicion >= 20:
         flags.append({"tipo": "negativo", "nivel": "warning", "icono": "🏳️",
             "titulo": "Tasa de rendición elevada",
-            "texto": f"Te rindes en el {pct_rendicion:.0f}% de tus partidas. Prueba a hacer una pausa de 10 minutos después de cada derrota antes de empezar la siguiente.",
+            "texto": f"Tu equipo rindió en el {pct_rendicion:.0f}% de tus partidas. Prueba a hacer una pausa de 10 minutos después de cada derrota antes de empezar la siguiente.",
             "metrica": f"{pct_rendicion:.0f}%"})
 
     if total_afks >= 3:
@@ -1446,10 +1479,17 @@ def stats_analisis(
             "metrica": f"{round(dur_media)}min media"})
 
     if pct_rendicion < 10 and int(row_stats.get("total_partidas", 0) or 0) >= 10:
+        extra = f" Además, el {pct_rendicion_pos:.0f}% de tus victorias fueron por rendición rival — señal de que presionas bien." if pct_rendicion_pos >= 20 else ""
         flags.append({"tipo": "positivo", "nivel": "good", "icono": "💪",
-            "titulo": "Baja tasa de rendición",
-            "texto": "Te rindes raramente. Indica buena gestión emocional y capacidad de mantenerte comprometido con el equipo incluso en partidas difíciles.",
-            "metrica": f"{pct_rendicion:.0f}%"})
+            "titulo": "Buena gestión emocional — pocas rendiciones",
+            "texto": f"Tu equipo rindió en apenas el {pct_rendicion:.0f}% de tus partidas. Indica compromiso con el equipo y resiliencia ante situaciones difíciles.{extra}",
+            "metrica": f"{pct_rendicion:.0f}% neg."})
+
+    if pct_rendicion_pos >= 25 and int(row_stats.get("total_partidas", 0) or 0) >= 10:
+        flags.append({"tipo": "positivo", "nivel": "good", "icono": "🏆",
+            "titulo": "El rival rinde con frecuencia",
+            "texto": f"El {pct_rendicion_pos:.0f}% de tus victorias fueron por rendición del equipo contrario. Significa que estás ejecutando bien las ventajas y cerrando partidas de forma convincente.",
+            "metrica": f"{pct_rendicion_pos:.0f}% victorias"})
 
     if racha_actual >= 7:
         flags.append({"tipo": "positivo", "nivel": "good", "icono": "🔥",

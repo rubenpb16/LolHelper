@@ -76,7 +76,7 @@ def calcular_horas_hoy(puuid):
             SELECT
                 COALESCE(SUM(duracion_min), 0) / 60.0  AS horas,
                 COUNT(*)                                AS partidas,
-                COALESCE(SUM(CASE WHEN rendicion THEN 1 ELSE 0 END), 0)           AS rendiciones,
+                COALESCE(SUM(CASE WHEN rendicion AND resultado = 'Derrota' THEN 1 ELSE 0 END), 0) AS rendiciones,
                 COALESCE(SUM(CASE WHEN NOT apto_para_progresion THEN 1 ELSE 0 END), 0) AS afks,
                 MODE() WITHIN GROUP (ORDER BY campeon)  AS campeon_mas_jugado
             FROM partidas

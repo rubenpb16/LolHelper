@@ -183,7 +183,7 @@ export default function Historial() {
               <div className={`val ${res.rendiciones > 5 ? 'val-danger' : 'val-warn'}`}>
                 {res.rendiciones || 0}
               </div>
-              <div className="lbl">rendiciones</div>
+              <div className="lbl">rendiciones propias 🏳</div>
             </div>
           </div>
 
@@ -325,8 +325,9 @@ export default function Historial() {
                           <td style={{ color: 'var(--muted)' }}>{fmt(p.duracion_min / 60)}</td>
                           <td style={{ color: 'var(--muted)' }}>{p.cs_min?.toFixed(1)}</td>
                           <td style={{ fontSize: 13 }}>
-                            {p.rendicion && <span title="Rendición">🏳</span>}
-                            {p.afk       && <span title="AFK">💤</span>}
+                            {p.rendicion_negativa && <span title="Tu equipo rindió">🏳</span>}
+                            {p.rendicion_positiva && <span title="El rival rindió">🤝</span>}
+                            {p.afk                && <span title="AFK">💤</span>}
                           </td>
                         </tr>
                       ))}

@@ -40,6 +40,11 @@ JWT_SECRET     = os.getenv("JWT_SECRET")
 JWT_ALGO       = "HS256"
 JWT_MINUTOS    = 60 * 24 * 7
 
+# Cuántos días atrás carga el extractor en la primera sincronización de un usuario
+SYNC_DIAS_INICIAL   = int(os.getenv("SYNC_DIAS_INICIAL",  "365"))
+# Intervalo en minutos del ciclo periódico (después de la carga inicial)
+SYNC_INTERVALO_MIN  = int(os.getenv("SYNC_INTERVALO_MIN", "5"))
+
 CORS_ORIGINS = [
     o.strip()
     for o in os.getenv(
