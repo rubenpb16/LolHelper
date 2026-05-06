@@ -32,10 +32,10 @@ from db import get_db
 
 # Rate limit conservador para Development Key
 # Dev Key: 20 req/s, 100 req/2min → esperamos 1.3s entre llamadas
-SLEEP_ENTRE_REQUESTS    = 0.3       # Con Production Key podemos ir más rápido
+SLEEP_ENTRE_REQUESTS    = 1.3      # Con Production Key podemos ir más rápido
 SLEEP_ENTRE_USUARIOS    = 1.0
 MAX_PARTIDAS_POR_PAGINA = 100       # Máximo por llamada que permite la API
-DIAS_ATRAS_DEFAULT      = 60        # Carga inicial: últimos 60 días (manejable)
+DIAS_ATRAS_DEFAULT      = 365        # Carga inicial: últimos 60 días (manejable)
 DIAS_VENTANA_PAGINACION = 30        # Tamaño de cada ventana al paginar
 
 
@@ -603,7 +603,10 @@ def sync_usuario(usuario):
         ranked = get_ranked(puuid, region)
         if ranked:
             upsert_ranked(puuid, ranked)
-            snapshot_rank(puuid, ranked)
+            try:
+                snapshot_rank(puuid, ranked)
+            except Exception as e_snap:
+                print(f"     ⚠️  historial_rank no disponible: {e_snap}")
             for q in ranked:
                 if q.get("queueType") == "RANKED_SOLO_5x5":
                     print(f"     🏆 {q['tier']} {q['rank']} — {q['leaguePoints']}LP")

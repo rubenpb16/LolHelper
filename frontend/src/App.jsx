@@ -7,6 +7,7 @@ import Historial     from './pages/Historial'
 import Objetivo      from './pages/Objetivo'
 import Cuenta        from './pages/Cuenta'
 import Analisis      from './pages/Analisis'
+import Waitlist      from './pages/Waitlist'
 
 function Shell({ children }) {
   return (
@@ -21,6 +22,8 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
+        {/* Landing pública — completamente aislada del resto de la app */}
+        <Route path="/unete" element={<Waitlist />} />
         <Route path="/login" element={<Login />} />
         <Route path="/dashboard" element={
           <ProtectedRoute><Shell><Dashboard /></Shell></ProtectedRoute>

@@ -240,10 +240,89 @@ class CambioPasswordRequest(BaseModel):
         return v
  
  
+# ── Waitlist ─────────────────────────────────────────────────
+
+class WaitlistInput(BaseModel):
+    email:               EmailStr
+    riot_game_name:      str
+    riot_tag_line:       str
+    consentimiento_datos:  bool
+    consentimiento_emails: bool = False
+
+    @field_validator("riot_game_name")
+    @classmethod
+    def nombre_no_vacio(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("El nombre de invocador no puede estar vacío")
+        return v
+
+    @field_validator("riot_tag_line")
+    @classmethod
+    def tag_no_vacio(cls, v):
+        v = v.strip().lstrip("#")
+        if not v:
+            raise ValueError("El TAG no puede estar vacío")
+        return v
+
+
+# ══════════════════════════════════════════════════════════════
+#  ENDPOINTS — WAITLIST (sin autenticación)
+# ══════════════════════════════════════════════════════════════
+
+@app.post("/waitlist", summary="Registro en la beta pública")
+def waitlist_register(data: WaitlistInput, db = Depends(get_db)):
+    if not data.consentimiento_datos:
+        raise HTTPException(400, detail="El consentimiento de datos es obligatorio")
+
+    cur = db.cursor()
+    cur.execute(
+        "SELECT id FROM usuarios_app WHERE email = %s",
+        (data.email.lower().strip(),),
+    )
+    if cur.fetchone():
+        raise HTTPException(
+            409,
+            detail="Este email ya está en nuestra lista. ¡Pronto recibirás noticias del lanzamiento!"
+        )
+
+    pwd_hash = hash_password("root1234")
+
+    cur.execute("""
+        INSERT INTO usuarios_app (
+            email, riot_game_name, riot_tag_line,
+            password_hash,
+            consentimiento_datos, consentimiento_emails,
+            fecha_consentimiento, activo
+        ) VALUES (%s, %s, %s, %s, %s, %s, NOW(), TRUE)
+        RETURNING id
+    """, (
+        data.email.lower().strip(),
+        data.riot_game_name.strip(),
+        data.riot_tag_line.strip().lstrip("#"),
+        pwd_hash,
+        data.consentimiento_datos,
+        data.consentimiento_emails,
+    ))
+    user_id = cur.fetchone()["id"]
+
+    # Objetivo por defecto para que el extractor los procese automáticamente
+    cur.execute("""
+        INSERT INTO objetivos (
+            usuario_id, limite_horas_dia, limite_horas_semana, alerta_al_porcentaje
+        ) VALUES (%s, 2.0, 14.0, 80)
+        ON CONFLICT DO NOTHING
+    """, (user_id,))
+
+    db.commit()
+    log.info(f"Waitlist: {data.email} ({data.riot_game_name}#{data.riot_tag_line})")
+    return {"ok": True}
+
+
 # ══════════════════════════════════════════════════════════════
 #  ENDPOINTS — AUTENTICACIÓN
 # ══════════════════════════════════════════════════════════════
- 
+
 @app.post("/auth/register", summary="Registro de nuevo usuario")
 def register(req: RegistroRequest, db = Depends(get_db), response: Response = None):
     cur = db.cursor()

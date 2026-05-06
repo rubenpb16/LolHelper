@@ -8,6 +8,7 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+lolusers_scraper.py
 
 # Logs
 *.log

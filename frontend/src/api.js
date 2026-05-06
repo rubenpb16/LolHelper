@@ -67,6 +67,10 @@ export const stats = {
   rankHistoria: (dias = 60) => api.get(`/stats/rank-historia?dias=${dias}`),
 }
 
+export const waitlist = {
+  register: (data) => api.post('/waitlist', data),
+}
+
 export const sync = {
   me: () => api.post('/sync/me'),
 }
