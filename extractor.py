@@ -174,6 +174,39 @@ def upsert_ranked(puuid, ranked_list):
         c.commit()
  
  
+_TIER_PTS     = {'IRON': 0, 'BRONZE': 400, 'SILVER': 800, 'GOLD': 1200,
+                  'PLATINUM': 1600, 'EMERALD': 2000, 'DIAMOND': 2400,
+                  'MASTER': 2800, 'GRANDMASTER': 3200, 'CHALLENGER': 3600}
+_DIVISION_PTS = {'IV': 0, 'III': 100, 'II': 200, 'I': 300}
+
+
+def snapshot_rank(puuid, ranked_list):
+    """Guarda un snapshot diario de LP para tracking histórico de progresión."""
+    with get_db() as c:
+        cur = c.cursor()
+        for q in ranked_list:
+            if q.get('queueType') != 'RANKED_SOLO_5x5':
+                continue
+            tier     = q.get('tier', '')
+            division = q.get('rank', '')
+            lp       = q.get('leaguePoints', 0)
+            puntos   = _TIER_PTS.get(tier, 0) + _DIVISION_PTS.get(division, 0) + lp
+            cur.execute("""
+                INSERT INTO historial_rank
+                    (puuid, fecha, queue_type, tier, division, lp, puntos_totales, victorias, derrotas)
+                VALUES (%s, CURRENT_DATE, 'RANKED_SOLO_5x5', %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (puuid, fecha, queue_type) DO UPDATE SET
+                    tier           = EXCLUDED.tier,
+                    division       = EXCLUDED.division,
+                    lp             = EXCLUDED.lp,
+                    puntos_totales = EXCLUDED.puntos_totales,
+                    victorias      = EXCLUDED.victorias,
+                    derrotas       = EXCLUDED.derrotas,
+                    registrado_en  = NOW()
+            """, (puuid, tier, division, lp, puntos, q.get('wins', 0), q.get('losses', 0)))
+        c.commit()
+
+
 def insertar_partidas(partidas):
     if not partidas:
         return 0
@@ -570,6 +603,7 @@ def sync_usuario(usuario):
         ranked = get_ranked(puuid, region)
         if ranked:
             upsert_ranked(puuid, ranked)
+            snapshot_rank(puuid, ranked)
             for q in ranked:
                 if q.get("queueType") == "RANKED_SOLO_5x5":
                     print(f"     🏆 {q['tier']} {q['rank']} — {q['leaguePoints']}LP")

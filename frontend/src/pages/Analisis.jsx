@@ -1,6 +1,88 @@
 import { useEffect, useState } from 'react'
 import { stats } from '../api'
 
+// ── LP line chart (SVG puro, sin dependencias externas) ──────
+const TIER_COLORS = {
+  IRON: '#8b7355', BRONZE: '#cd7f32', SILVER: '#a8a9ad',
+  GOLD: '#ffd700', PLATINUM: '#00c9a7', EMERALD: '#50c878',
+  DIAMOND: '#9fc4e8', MASTER: '#c261f5', GRANDMASTER: '#f4c430',
+  CHALLENGER: '#e6cc80',
+}
+
+function LpChart({ historia }) {
+  const [tooltip, setTooltip] = useState(null)
+  if (!historia || historia.length < 2)
+    return <p style={{ color: 'var(--muted)', fontSize: 13 }}>Necesitas al menos 2 sincronizaciones con partidas ranked para ver el historial de LP.</p>
+
+  const W = 560, H = 130
+  const PAD = { top: 14, bottom: 26, left: 4, right: 4 }
+  const innerW = W - PAD.left - PAD.right
+  const innerH = H - PAD.top - PAD.bottom
+
+  const vals = historia.map(h => h.puntos)
+  const minV = Math.min(...vals), maxV = Math.max(...vals)
+  const range = maxV - minV || 100
+
+  const xOf = i  => PAD.left + (i / (historia.length - 1)) * innerW
+  const yOf = v  => PAD.top  + (1 - (v - minV) / range) * innerH
+
+  const pts  = historia.map((h, i) => `${xOf(i)},${yOf(h.puntos)}`).join(' ')
+  const poly = `${xOf(0)},${H - PAD.bottom} ${pts} ${xOf(historia.length - 1)},${H - PAD.bottom}`
+  const diff = vals[vals.length - 1] - vals[0]
+  const col  = diff >= 0 ? 'var(--success)' : 'var(--danger)'
+
+  const labelIndices = historia.length <= 4
+    ? historia.map((_, i) => i)
+    : [0, Math.round(historia.length * 0.33), Math.round(historia.length * 0.66), historia.length - 1]
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', overflow: 'visible' }}>
+        <defs>
+          <linearGradient id="lp-fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stopColor={diff >= 0 ? '#34d399' : '#f87171'} stopOpacity="0.18" />
+            <stop offset="100%" stopColor={diff >= 0 ? '#34d399' : '#f87171'} stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        <polygon points={poly} fill="url(#lp-fill)" />
+        <polyline points={pts} fill="none" stroke={col} strokeWidth="2" strokeLinejoin="round" />
+        {historia.map((h, i) => (
+          <circle key={i}
+            cx={xOf(i)} cy={yOf(h.puntos)} r={4}
+            fill={TIER_COLORS[h.tier] || col}
+            stroke="var(--bg2)" strokeWidth={1.5}
+            style={{ cursor: 'pointer' }}
+            onMouseEnter={() => setTooltip({ i, x: xOf(i), y: yOf(h.puntos), h })}
+            onMouseLeave={() => setTooltip(null)}
+          />
+        ))}
+        {labelIndices.map(i => (
+          <text key={i} x={xOf(i)} y={H - 6} textAnchor="middle"
+            fontSize={9} fill="rgba(107,114,128,.9)">
+            {historia[i].fecha.slice(5).replace('-', '/')}
+          </text>
+        ))}
+      </svg>
+      {tooltip && (
+        <div style={{
+          position: 'absolute',
+          left:  Math.min(tooltip.x / W * 100, 78) + '%',
+          top:   tooltip.y / H * 100 - 30 + '%',
+          background: 'var(--bg3)', border: '1px solid var(--border2)',
+          borderRadius: 8, padding: '6px 10px', fontSize: 12,
+          pointerEvents: 'none', whiteSpace: 'nowrap', zIndex: 10,
+          color: TIER_COLORS[tooltip.h.tier] || 'var(--text)',
+        }}>
+          <strong>{tooltip.h.tier} {tooltip.h.division} — {tooltip.h.lp} LP</strong>
+          <div style={{ color: 'var(--muted)', marginTop: 2 }}>
+            {tooltip.h.victorias}V {tooltip.h.derrotas}D · {tooltip.h.fecha}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Helpers ───────────────────────────────────────────────────
 function fmt(min) {
   if (!min && min !== 0) return '—'
@@ -93,6 +175,7 @@ export default function Analisis() {
   const [customFrom, setCustomFrom] = useState('')
   const [customTo,   setCustomTo]   = useState('')
   const [useCustom,  setUseCustom]  = useState(false)
+  const [rankData,   setRankData]   = useState(null)
 
   async function load(params) {
     if (!data) setLoading(true)
@@ -114,6 +197,13 @@ export default function Analisis() {
       load({ dias })
     }
   }, [dias, useCustom, customFrom, customTo])
+
+  // LP history se carga una sola vez (no depende del rango de análisis)
+  useEffect(() => {
+    stats.rankHistoria(60)
+      .then(r => setRankData(r.data))
+      .catch(() => {})
+  }, [])
 
   function handleDiasChange(d) {
     setUseCustom(false); setDias(d)
@@ -463,6 +553,37 @@ export default function Analisis() {
           )}
         </div>
       </div>
+
+      {/* ── Historial de LP Ranked ── */}
+      {rankData && (() => {
+        const hist = rankData.historia || []
+        if (hist.length === 0) return null
+        const first = hist[0], last = hist[hist.length - 1]
+        const diff  = last.puntos - first.puntos
+        const diffColor = diff > 0 ? 'var(--success)' : diff < 0 ? 'var(--danger)' : 'var(--muted)'
+        return (
+          <div className="card" style={{ marginBottom: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+              <p className="section-title">Progresión de LP — Ranked Solo/Duo (últimos 60 días)</p>
+              <div style={{ textAlign: 'right', fontSize: 12 }}>
+                <span style={{ color: 'var(--muted)' }}>
+                  {first.tier} {first.division} {first.lp} LP → </span>
+                <span style={{ color: TIER_COLORS[last.tier] || 'var(--text)', fontWeight: 600 }}>
+                  {last.tier} {last.division} {last.lp} LP
+                </span>
+                <span style={{ color: diffColor, marginLeft: 8, fontWeight: 600 }}>
+                  {diff > 0 ? '+' : ''}{diff} pts
+                </span>
+              </div>
+            </div>
+            <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 16, lineHeight: 1.5 }}>
+              Cada punto refleja tu LP acumulado (tier + división + LP). Pasa el ratón sobre los puntos para ver el detalle.
+              Correlaciona esta curva con los días en que superaste tu límite para detectar si jugar más te ayuda o te perjudica.
+            </p>
+            <LpChart historia={hist} />
+          </div>
+        )
+      })()}
     </div>
   )
 }

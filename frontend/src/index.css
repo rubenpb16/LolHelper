@@ -518,6 +518,55 @@ input, select, textarea {
   color: var(--muted);
 }
 
+/* ── Modal / Overlay ─────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.78);
+  backdrop-filter: blur(5px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+  animation: fadeIn .2s ease;
+}
+
+.modal-card {
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-lg);
+  padding: 36px;
+  max-width: 460px;
+  width: 100%;
+  animation: scaleIn .22s ease;
+}
+
+@keyframes fadeIn  { from { opacity: 0 }              to { opacity: 1 } }
+@keyframes scaleIn { from { opacity: 0; transform: scale(.91) } to { opacity: 1; transform: scale(1) } }
+
+/* ── Tilt modal ──────────────────────────────── */
+.tilt-modal { border-color: rgba(248,113,113,.3); text-align: center; }
+
+.tilt-modal-icon { font-size: 44px; margin-bottom: 16px; }
+
+.tilt-modal h2 { font-size: 20px; margin-bottom: 14px; color: var(--text); }
+
+.tilt-modal > p {
+  font-size: 14px;
+  color: var(--muted);
+  line-height: 1.75;
+  margin-bottom: 10px;
+}
+
+.tilt-sub {
+  font-size: 12px !important;
+  font-style: italic;
+  margin-bottom: 24px !important;
+}
+
+.tilt-actions { display: flex; gap: 12px; margin-top: 4px; }
+
 /* ── Selectors de días ───────────────────────── */
 .days-selector {
   display: flex;

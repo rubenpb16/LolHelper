@@ -17,13 +17,29 @@ function BarColor(pct) {
 
 const DIAS = ['Lun','Mar','Mié','Jue','Vie','Sáb','Dom']
 
+// Mensajes empáticos según el tipo de tilt detectado
+const TILT_CONTENT = {
+  losses: {
+    icon: '🔴',
+    title: 'Llevas varias derrotas seguidas',
+    body:  'Perder en racha es señal de que algo no está funcionando — puede ser el cansancio, la frustración o simplemente un mal momento. Lo más inteligente suele ser parar aquí y volver fresco.',
+  },
+  surrenders: {
+    icon: '🏳️',
+    title: 'Varias rendiciones seguidas',
+    body:  'Rendir varias veces seguidas indica que el juego está generando más frustración que disfrute. No es un juicio — es la señal que estás esperando para hacer una pausa.',
+  },
+}
+
 export default function Dashboard() {
-  const [data,      setData]      = useState(null)
-  const [behavior,  setBehavior]  = useState(null)
-  const [loading,   setLoading]   = useState(true)
-  const [error,     setError]     = useState('')
-  const [syncing,   setSyncing]   = useState(false)
-  const [syncMsg,   setSyncMsg]   = useState(null)   // { type: 'ok'|'info'|'error', text }
+  const [data,          setData]          = useState(null)
+  const [behavior,      setBehavior]      = useState(null)
+  const [loading,       setLoading]       = useState(true)
+  const [error,         setError]         = useState('')
+  const [syncing,       setSyncing]       = useState(false)
+  const [syncMsg,       setSyncMsg]       = useState(null)   // { type: 'ok'|'info'|'error', text }
+  const [showTiltModal, setShowTiltModal] = useState(false)
+  const [tiltType,      setTiltType]      = useState(null)   // 'losses' | 'surrenders'
 
   const loadData = useCallback(async () => {
     try {
@@ -41,6 +57,26 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => { loadData() }, [loadData])
+
+  // Detectar tilt al cargar datos (una vez por día)
+  useEffect(() => {
+    if (!data?.ultimas_partidas?.length) return
+    const today = new Date().toISOString().slice(0, 10)
+    const key   = `tilt_dismissed_${today}`
+    if (localStorage.getItem(key)) return
+
+    const recent = data.ultimas_partidas.slice(0, 3)
+    const allLosses      = recent.length >= 3 && recent.every(p => p.resultado !== 'Victoria')
+    const manySurrenders = recent.filter(p => p.rendicion).length >= 2
+
+    if (allLosses) {
+      setTiltType('losses')
+      setShowTiltModal(true)
+    } else if (manySurrenders) {
+      setTiltType('surrenders')
+      setShowTiltModal(true)
+    }
+  }, [data])
 
   async function handleSync() {
     setSyncing(true)
@@ -81,6 +117,12 @@ export default function Dashboard() {
     } finally {
       setSyncing(false)
     }
+  }
+
+  function dismissTilt() {
+    const today = new Date().toISOString().slice(0, 10)
+    localStorage.setItem(`tilt_dismissed_${today}`, '1')
+    setShowTiltModal(false)
   }
 
   if (loading) return <div className="loader"><div className="spinner" /> Cargando...</div>
@@ -247,6 +289,23 @@ export default function Dashboard() {
             Total: <strong style={{ color: 'var(--text)' }}>{fmt(semana.horas)}</strong>
             {objetivo.limite_semana > 0 && ` de ${fmt(objetivo.limite_semana)}`}
           </div>
+          {/* Comparativa vs semana anterior */}
+          {semana.anterior >= 0 && (() => {
+            const diff = semana.horas - semana.anterior
+            if (Math.abs(diff) < 0.08) return (
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>
+                → Igual que la semana pasada ({fmt(semana.anterior)})
+              </div>
+            )
+            const mejor = diff < 0
+            const color = mejor ? 'var(--success)' : diff > 1 ? 'var(--danger)' : 'var(--warning)'
+            return (
+              <div style={{ fontSize: 12, color, marginTop: 6, fontWeight: 500 }}>
+                {mejor ? '↓' : '↑'} {fmt(Math.abs(diff))} {mejor ? 'menos' : 'más'} que la semana pasada
+                <span style={{ color: 'var(--muted)', fontWeight: 400 }}> ({fmt(semana.anterior)})</span>
+              </div>
+            )
+          })()}
         </div>
 
         {/* Últimas partidas */}
@@ -310,6 +369,39 @@ export default function Dashboard() {
           ))}
         </div>
       )}
+
+      {/* Modal de tilt */}
+      {showTiltModal && tiltType && (() => {
+        const c = TILT_CONTENT[tiltType]
+        return (
+          <div className="modal-overlay" onClick={dismissTilt}>
+            <div className="modal-card tilt-modal" onClick={e => e.stopPropagation()}>
+              <div className="tilt-modal-icon">{c.icon}</div>
+              <h2>{c.title}</h2>
+              <p>{c.body}</p>
+              <p className="tilt-sub">
+                Esto no es un juicio — es exactamente la razón por la que instalaste LolHelper.
+              </p>
+              <div className="tilt-actions">
+                <button
+                  className="btn btn-primary"
+                  style={{ flex: 1 }}
+                  onClick={dismissTilt}
+                >
+                  Tomar un descanso
+                </button>
+                <button
+                  className="btn"
+                  style={{ flex: 1, fontSize: 13 }}
+                  onClick={dismissTilt}
+                >
+                  Seguir jugando de todas formas
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
     </div>
   )
 }

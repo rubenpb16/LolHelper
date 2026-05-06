@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from psycopg2.pool import ThreadedConnectionPool
 from psycopg2.extras import RealDictCursor
 from psycopg2 import OperationalError
+from psycopg2.extensions import cursor as _DefaultCursor
 from config import DB_CONFIG
 
 _pool = None
@@ -60,4 +61,5 @@ def get_db_api():
         conn.rollback()
         raise
     finally:
+        conn.cursor_factory = _DefaultCursor  # evita contaminar el pool
         _get_pool().putconn(conn)

@@ -435,6 +435,16 @@ def dashboard(usuario = Depends(get_usuario_actual), db = Depends(get_db)):
         GROUP BY fecha ORDER BY fecha
     """, (puuid, lunes))
     semana = [dict(r) for r in cur.fetchall()]
+
+    # ── Semana anterior (lunes-7 a domingo pasado) ────────────
+    lunes_anterior   = lunes - timedelta(days=7)
+    domingo_anterior = lunes - timedelta(days=1)
+    cur.execute("""
+        SELECT COALESCE(ROUND(SUM(duracion_min)::numeric / 60, 2), 0) AS horas_ant
+        FROM partidas
+        WHERE puuid = %s AND fecha >= %s AND fecha <= %s
+    """, (puuid, lunes_anterior, domingo_anterior))
+    horas_semana_anterior = float(cur.fetchone()["horas_ant"])
  
     # ── Racha ─────────────────────────────────────────────────
     cur.execute("""
@@ -485,6 +495,7 @@ def dashboard(usuario = Depends(get_usuario_actual), db = Depends(get_db)):
             "horas":        horas_semana,
             "porcentaje":   pct_semana,
             "dias":         semana,
+            "anterior":     horas_semana_anterior,
         },
         "objetivo": {
             "limite_dia":     limite_d,
@@ -944,6 +955,42 @@ with_session AS (
     FROM with_gaps
 )
 """
+
+
+@app.get("/stats/rank-historia", summary="Historial de LP diario en Ranked Solo")
+def rank_historia(
+    dias:    int = 60,
+    usuario = Depends(get_usuario_actual),
+    db      = Depends(get_db),
+):
+    puuid = usuario.get("puuid")
+    if not puuid:
+        return {"historia": []}
+
+    cur = db.cursor()
+    cur.execute("""
+        SELECT fecha, tier, division, lp, puntos_totales, victorias, derrotas
+        FROM historial_rank
+        WHERE puuid = %s
+          AND queue_type = 'RANKED_SOLO_5x5'
+          AND fecha >= CURRENT_DATE - (%s * INTERVAL '1 day')
+        ORDER BY fecha ASC
+    """, (puuid, dias))
+
+    return {
+        "historia": [
+            {
+                "fecha":     str(r["fecha"]),
+                "tier":      r["tier"],
+                "division":  r["division"],
+                "lp":        r["lp"],
+                "puntos":    r["puntos_totales"],
+                "victorias": r["victorias"],
+                "derrotas":  r["derrotas"],
+            }
+            for r in cur.fetchall()
+        ]
+    }
 
 
 @app.get("/stats/analisis", summary="Análisis descriptivo: sesiones, curva, perfil y bienestar")

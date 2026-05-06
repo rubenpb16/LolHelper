@@ -64,6 +64,7 @@ export const stats = {
     }
     return api.get(`/stats/analisis?${qs}`)
   },
+  rankHistoria: (dias = 60) => api.get(`/stats/rank-historia?dias=${dias}`),
 }
 
 export const sync = {

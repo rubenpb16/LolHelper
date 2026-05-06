@@ -376,6 +376,26 @@ COMMENT ON TABLE alertas_enviadas IS 'Registro histórico de todos los emails en
 # BLOQUE 8: SYNC LOG (extracción de API)
 # ─────────────────────────────────────────────────────────────
 
+TABLAS["historial_rank"] = """
+CREATE TABLE IF NOT EXISTS historial_rank (
+    id              SERIAL PRIMARY KEY,
+    puuid           VARCHAR(100) NOT NULL REFERENCES jugadores(puuid) ON DELETE CASCADE,
+    fecha           DATE NOT NULL DEFAULT CURRENT_DATE,
+    queue_type      VARCHAR(30) DEFAULT 'RANKED_SOLO_5x5',
+    tier            VARCHAR(20),
+    division        VARCHAR(5),
+    lp              INT DEFAULT 0,
+    puntos_totales  INT DEFAULT 0,
+    victorias       INT DEFAULT 0,
+    derrotas        INT DEFAULT 0,
+    registrado_en   TIMESTAMP DEFAULT NOW(),
+    UNIQUE (puuid, fecha, queue_type)
+);
+
+COMMENT ON TABLE historial_rank IS 'Snapshot diario de LP/rank para tracking de progresión ranked';
+COMMENT ON COLUMN historial_rank.puntos_totales IS 'LP absoluto: tier*400 + division*100 + lp (útil para graficar tendencia)';
+"""
+
 TABLAS["sync_log"] = """
 CREATE TABLE IF NOT EXISTS sync_log (
     id                          SERIAL PRIMARY KEY,
@@ -412,6 +432,9 @@ CREATE INDEX IF NOT EXISTS idx_progreso_usuario_fecha ON progreso_diario(usuario
 
 -- Alertas: buscar si ya se envió una alerta hoy
 CREATE INDEX IF NOT EXISTS idx_alertas_usuario_tipo   ON alertas_enviadas(usuario_id, tipo, enviado_en);
+
+-- Historial rank
+CREATE INDEX IF NOT EXISTS idx_historial_rank_puuid   ON historial_rank(puuid, fecha);
 
 -- Sync log
 CREATE INDEX IF NOT EXISTS idx_sync_puuid             ON sync_log(puuid);
