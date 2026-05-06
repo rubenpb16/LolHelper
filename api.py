@@ -1366,10 +1366,9 @@ _SYNC_COOLDOWN_SEG = 120
 @app.post("/sync/me", summary="Sincronizar partidas del usuario actual")
 def sync_me(usuario = Depends(get_usuario_actual), db = Depends(get_db)):
     """
-    Descarga e inserta las partidas nuevas solo del usuario autenticado.
-    Ejecuta el mismo sync incremental que el scheduler, pero bajo demanda.
-    Siempre actualiza ultima_sincronizacion al terminar para que el cooldown
-    funcione aunque sync_usuario no encuentre partidas nuevas.
+    Lanza la sincronización en un hilo de fondo y responde inmediatamente.
+    Esto evita timeouts en Render y en el navegador durante la carga inicial,
+    que puede tardar varios minutos si hay mucho historial por importar.
     """
     from extractor import sync_usuario
 
@@ -1388,48 +1387,37 @@ def sync_me(usuario = Depends(get_usuario_actual), db = Depends(get_db)):
                 detail=f"Sincronización reciente. Espera {espera}s antes de volver a sincronizar."
             )
 
-    puuid_previo = usuario.get("puuid")
+    # Marcar sync como iniciada antes de lanzar el hilo
+    cur = db.cursor()
+    cur.execute(
+        "UPDATE usuarios_app SET ultima_sincronizacion = NOW() WHERE id = %s",
+        (usuario["id"],)
+    )
+    db.commit()
 
-    try:
-        nuevas = sync_usuario({
-            "id":                    usuario["id"],
-            "email":                 usuario["email"],
-            "riot_game_name":        usuario["riot_game_name"],
-            "riot_tag_line":         usuario["riot_tag_line"],
-            "puuid":                 puuid_previo,
-            "region":                usuario.get("region", "EUW"),
-            "ultima_sincronizacion": ultima,
-        })
-    except Exception as e:
-        log.error(f"Error sync manual {usuario['email']}: {e}")
-        raise HTTPException(status_code=500, detail="Error al sincronizar. Inténtalo de nuevo.")
-    finally:
-        # Actualizar ultima_sincronizacion siempre, incluso con 0 partidas,
-        # para que el cooldown funcione en todas las circunstancias.
-        cur = db.cursor()
-        cur.execute(
-            "UPDATE usuarios_app SET ultima_sincronizacion = NOW() WHERE id = %s",
-            (usuario["id"],)
-        )
-        db.commit()
+    usuario_data = {
+        "id":                    usuario["id"],
+        "email":                 usuario["email"],
+        "riot_game_name":        usuario["riot_game_name"],
+        "riot_tag_line":         usuario["riot_tag_line"],
+        "puuid":                 usuario.get("puuid"),
+        "region":                usuario.get("region", "EUW"),
+        "ultima_sincronizacion": ultima,
+    }
 
-    # Si el usuario no tenía puuid y sigue sin tenerlo, la cuenta no existe en Riot
-    if not puuid_previo:
-        cur = db.cursor()
-        cur.execute("SELECT puuid FROM usuarios_app WHERE id = %s", (usuario["id"],))
-        row = cur.fetchone()
-        if not row or not row["puuid"]:
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    f"No se encontró la cuenta "
-                    f"'{usuario['riot_game_name']}#{usuario['riot_tag_line']}' "
-                    f"en Riot Games. Verifica tu nombre de invocador y TAG."
-                )
-            )
+    def _run():
+        try:
+            nuevas = sync_usuario(usuario_data)
+            log.info(f"Sync manual completada: {usuario['riot_game_name']} -> {nuevas or 0} partidas nuevas")
+        except Exception as e:
+            log.error(f"Error en sync manual de {usuario['email']}: {e}")
 
-    log.info(f"Sync manual: {usuario['riot_game_name']} -> {nuevas or 0} partidas nuevas")
-    return {"partidas_nuevas": nuevas or 0}
+    threading.Thread(target=_run, daemon=True).start()
+
+    return {
+        "message":  "Sincronización iniciada. Los datos aparecerán en el dashboard en unos minutos.",
+        "en_curso": True,
+    }
 
 
 # ══════════════════════════════════════════════════════════════

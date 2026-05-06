@@ -47,23 +47,35 @@ export default function Dashboard() {
     setSyncMsg(null)
     try {
       const res = await sync.me()
-      const n   = res.data.partidas_nuevas
-      setSyncMsg({
-        type: n > 0 ? 'ok' : 'info',
-        text: n > 0
-          ? `${n} partida${n !== 1 ? 's' : ''} nueva${n !== 1 ? 's' : ''} importada${n !== 1 ? 's' : ''}`
-          : 'Todo al día — no hay partidas nuevas desde el último sync',
-      })
-      await loadData()
+
+      if (res.data.en_curso) {
+        // Sync asíncrona: refrescar cada 10s hasta que aparezcan datos
+        setSyncMsg({ type: 'info', text: 'Importando partidas… esto puede tardar 1-2 minutos. La página se actualizará sola.' })
+        let intentos = 0
+        const intervalo = setInterval(async () => {
+          intentos++
+          await loadData()
+          if (intentos >= 18) clearInterval(intervalo) // máx 3 min
+        }, 10000)
+      } else {
+        const n = res.data.partidas_nuevas ?? 0
+        setSyncMsg({
+          type: n > 0 ? 'ok' : 'info',
+          text: n > 0
+            ? `${n} partida${n !== 1 ? 's' : ''} nueva${n !== 1 ? 's' : ''} importada${n !== 1 ? 's' : ''}`
+            : 'Todo al día — no hay partidas nuevas desde el último sync',
+        })
+        await loadData()
+      }
     } catch (err) {
       const status = err.response?.status
       const detail = err.response?.data?.detail || 'Error al sincronizar'
       setSyncMsg({
         type: 'error',
         text: status === 429
-          ? detail                           // "Espera Xs" del cooldown
+          ? detail
           : status === 404
-          ? detail                           // "Cuenta no encontrada en Riot"
+          ? detail
           : 'Error al conectar con Riot. Comprueba tu conexión e inténtalo de nuevo.',
       })
     } finally {

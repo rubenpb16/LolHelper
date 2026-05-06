@@ -32,10 +32,10 @@ from db import get_db
 
 # Rate limit conservador para Development Key
 # Dev Key: 20 req/s, 100 req/2min → esperamos 1.3s entre llamadas
-SLEEP_ENTRE_REQUESTS    = 0.5
-SLEEP_ENTRE_USUARIOS    = 2.0
+SLEEP_ENTRE_REQUESTS    = 0.3       # Con Production Key podemos ir más rápido
+SLEEP_ENTRE_USUARIOS    = 1.0
 MAX_PARTIDAS_POR_PAGINA = 100       # Máximo por llamada que permite la API
-DIAS_ATRAS_DEFAULT      = 365      # 6 meses para la carga histórica inicial
+DIAS_ATRAS_DEFAULT      = 60        # Carga inicial: últimos 60 días (manejable)
 DIAS_VENTANA_PAGINACION = 30        # Tamaño de cada ventana al paginar
 
 
