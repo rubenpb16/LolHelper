@@ -7,7 +7,13 @@ import Historial     from './pages/Historial'
 import Objetivo      from './pages/Objetivo'
 import Cuenta        from './pages/Cuenta'
 import Analisis      from './pages/Analisis'
-import Waitlist      from './pages/Waitlist'
+import Waitlist           from './pages/Waitlist'
+import InvitacionPro      from './pages/InvitacionPro'
+import ProLogin            from './pages/pro/ProLogin'
+import ProRegistro         from './pages/pro/ProRegistro'
+import ProDashboard        from './pages/pro/ProDashboard'
+import ProPacienteDetalle  from './pages/pro/ProPacienteDetalle'
+import ProProtectedRoute   from './components/ProProtectedRoute'
 
 function Shell({ children }) {
   return (
@@ -22,8 +28,20 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        {/* Landing pública — completamente aislada del resto de la app */}
-        <Route path="/unete" element={<Waitlist />} />
+        {/* Rutas públicas */}
+        <Route path="/unete"             element={<Waitlist />} />
+        <Route path="/invitacion/:token" element={<InvitacionPro />} />
+
+        {/* Portal profesional — estilo y auth completamente independientes */}
+        <Route path="/pro/login"    element={<ProLogin />} />
+        <Route path="/pro/registro" element={<ProRegistro />} />
+        <Route path="/pro/dashboard" element={
+          <ProProtectedRoute><ProDashboard /></ProProtectedRoute>
+        }/>
+        <Route path="/pro/pacientes/:pacienteId" element={
+          <ProProtectedRoute><ProPacienteDetalle /></ProProtectedRoute>
+        }/>
+
         <Route path="/login" element={<Login />} />
         <Route path="/dashboard" element={
           <ProtectedRoute><Shell><Dashboard /></Shell></ProtectedRoute>

@@ -31,7 +31,9 @@ export const auth = {
 }
 
 export const dashboard = {
-  get: () => api.get('/dashboard'),
+  get:  ()                    => api.get('/dashboard'),
+  mes:  (year, month)         => api.get(`/dashboard/mes?year=${year}&month=${month}`),
+  dia:  (fecha)               => api.get(`/dashboard/dia?fecha=${fecha}`),
 }
 
 export const historial = {
@@ -69,6 +71,58 @@ export const stats = {
 
 export const waitlist = {
   register: (data) => api.post('/waitlist', data),
+}
+
+// ── B2B: Profesionales ────────────────────────────────────────
+
+export const proAuth = {
+  registro: (data) => api.post('/pro/registro', data),
+  login: (data) => api.post('/auth/login',
+    new URLSearchParams(data),
+    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+  ),
+  me:     () => api.get('/pro/me'),
+  logout: () => api.post('/auth/logout'),
+}
+
+export const proInvitacion = {
+  info:    (token)        => api.get(`/invitacion/${token}`),
+  aceptar: (token, data)  => api.post(`/invitacion/${token}/aceptar`, data),
+}
+
+export const proPacientes = {
+  lista:          ()                              => api.get('/pro/pacientes'),
+  dashboard:      (id)                            => api.get(`/pro/pacientes/${id}/dashboard`),
+  historial:      (id, params = {})               => {
+    const qs = new URLSearchParams()
+    if (params.fecha_inicio && params.fecha_fin) {
+      qs.set('fecha_inicio', params.fecha_inicio)
+      qs.set('fecha_fin',    params.fecha_fin)
+    } else {
+      qs.set('dias', params.dias ?? 30)
+    }
+    qs.set('limit',  params.limit  ?? 50)
+    qs.set('offset', params.offset ?? 0)
+    return api.get(`/pro/pacientes/${id}/historial?${qs}`)
+  },
+  analisis:       (id, params = {})               => {
+    const qs = new URLSearchParams()
+    if (params.fecha_inicio && params.fecha_fin) {
+      qs.set('fecha_inicio', params.fecha_inicio)
+      qs.set('fecha_fin_p',  params.fecha_fin)
+    } else {
+      qs.set('dias', params.dias ?? 30)
+    }
+    return api.get(`/pro/pacientes/${id}/analisis?${qs}`)
+  },
+  rankHistoria:   (id, dias = 60)                 => api.get(`/pro/pacientes/${id}/rank-historia?dias=${dias}`),
+  mes:            (id, year, month)               => api.get(`/pro/pacientes/${id}/mes?year=${year}&month=${month}`),
+  dia:            (id, fecha)                     => api.get(`/pro/pacientes/${id}/dia?fecha=${fecha}`),
+  notas:          (id)                            => api.get(`/pro/pacientes/${id}/notas`),
+  crearNota:      (id, contenido)                 => api.post(`/pro/pacientes/${id}/notas`, { contenido }),
+  editarNota:     (id, notaId, contenido)         => api.put(`/pro/pacientes/${id}/notas/${notaId}`, { contenido }),
+  borrarNota:     (id, notaId)                    => api.delete(`/pro/pacientes/${id}/notas/${notaId}`),
+  actualizarEstado: (id, estado)                  => api.patch(`/pro/pacientes/${id}/estado`, { estado }),
 }
 
 export const sync = {

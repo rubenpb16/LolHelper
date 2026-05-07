@@ -396,6 +396,86 @@ COMMENT ON TABLE historial_rank IS 'Snapshot diario de LP/rank para tracking de 
 COMMENT ON COLUMN historial_rank.puntos_totales IS 'LP absoluto: tier*400 + division*100 + lp (útil para graficar tendencia)';
 """
 
+# ─────────────────────────────────────────────────────────────
+# BLOQUE B2B: PROFESIONALES, RELACIONES Y NOTAS
+# ─────────────────────────────────────────────────────────────
+
+TABLAS["profesionales"] = """
+CREATE TABLE IF NOT EXISTS profesionales (
+    id                  SERIAL PRIMARY KEY,
+    usuario_id          INT NOT NULL UNIQUE REFERENCES usuarios_app(id) ON DELETE CASCADE,
+
+    -- Datos profesionales
+    nombre              VARCHAR(100) NOT NULL,
+    apellidos           VARCHAR(100) NOT NULL,
+    numero_colegiado    VARCHAR(50),
+    especialidad        VARCHAR(100),
+
+    -- Token único para el enlace de invitación (p.ej. /invitacion/<link_token>)
+    link_token          VARCHAR(64) UNIQUE NOT NULL,
+
+    -- Estado
+    verificado          BOOLEAN DEFAULT FALSE,
+    activo              BOOLEAN DEFAULT TRUE,
+    fecha_registro      TIMESTAMP DEFAULT NOW()
+);
+
+COMMENT ON TABLE profesionales IS 'Perfil del profesional sanitario (psicólogo, terapeuta, etc.)';
+COMMENT ON COLUMN profesionales.link_token IS 'Token único para el enlace de invitación que el profesional comparte con sus pacientes';
+"""
+
+TABLAS["invitaciones_pro"] = """
+CREATE TABLE IF NOT EXISTS invitaciones_pro (
+    id              SERIAL PRIMARY KEY,
+    profesional_id  INT NOT NULL REFERENCES profesionales(id) ON DELETE CASCADE,
+    token           VARCHAR(64) UNIQUE NOT NULL,
+    email_paciente  VARCHAR(254),
+    riot_game_name  VARCHAR(50),
+    riot_tag_line   VARCHAR(10),
+    paciente_id     INT REFERENCES usuarios_app(id),
+    estado          VARCHAR(30) DEFAULT 'pendiente_registro',
+    fecha_creacion  TIMESTAMP DEFAULT NOW(),
+    fecha_aceptacion TIMESTAMP
+);
+
+COMMENT ON TABLE invitaciones_pro IS 'Invitaciones pendientes de registro enviadas por profesionales a pacientes';
+"""
+
+TABLAS["relaciones_pro_paciente"] = """
+CREATE TABLE IF NOT EXISTS relaciones_pro_paciente (
+    id                  SERIAL PRIMARY KEY,
+    profesional_id      INT NOT NULL REFERENCES profesionales(id) ON DELETE CASCADE,
+    paciente_id         INT NOT NULL REFERENCES usuarios_app(id) ON DELETE CASCADE,
+
+    -- Embudo de tratamiento
+    estado_tratamiento  VARCHAR(30) DEFAULT 'evaluacion',
+    -- evaluacion → tratamiento_activo → seguimiento → alta
+
+    fecha_inicio        TIMESTAMP DEFAULT NOW(),
+    fecha_alta          TIMESTAMP,                      -- se rellena al dar de alta
+    activo              BOOLEAN DEFAULT TRUE,
+
+    -- Registro de consentimiento RGPD explícito del paciente
+    consentimiento_fecha TIMESTAMP DEFAULT NOW(),
+
+    UNIQUE (profesional_id, paciente_id)
+);
+
+COMMENT ON TABLE relaciones_pro_paciente IS 'Relación muchos-a-muchos entre profesional y paciente con estado de tratamiento';
+"""
+
+TABLAS["notas_profesional"] = """
+CREATE TABLE IF NOT EXISTS notas_profesional (
+    id              SERIAL PRIMARY KEY,
+    relacion_id     INT NOT NULL REFERENCES relaciones_pro_paciente(id) ON DELETE CASCADE,
+    contenido       TEXT NOT NULL,
+    creada_en       TIMESTAMP DEFAULT NOW(),
+    editada_en      TIMESTAMP
+);
+
+COMMENT ON TABLE notas_profesional IS 'Notas privadas del profesional sobre el paciente — no visibles para el paciente';
+"""
+
 TABLAS["sync_log"] = """
 CREATE TABLE IF NOT EXISTS sync_log (
     id                          SERIAL PRIMARY KEY,
@@ -438,6 +518,19 @@ CREATE INDEX IF NOT EXISTS idx_historial_rank_puuid   ON historial_rank(puuid, f
 
 -- Sync log
 CREATE INDEX IF NOT EXISTS idx_sync_puuid             ON sync_log(puuid);
+
+-- B2B: profesionales y relaciones
+CREATE INDEX IF NOT EXISTS idx_pro_usuario            ON profesionales(usuario_id);
+CREATE INDEX IF NOT EXISTS idx_pro_link_token         ON profesionales(link_token);
+CREATE INDEX IF NOT EXISTS idx_rel_profesional        ON relaciones_pro_paciente(profesional_id);
+CREATE INDEX IF NOT EXISTS idx_rel_paciente           ON relaciones_pro_paciente(paciente_id);
+CREATE INDEX IF NOT EXISTS idx_notas_relacion         ON notas_profesional(relacion_id);
+"""
+
+# Migración incremental: añade columnas a usuarios_app si no existen aún
+MIGRACIONES = """
+ALTER TABLE usuarios_app ADD COLUMN IF NOT EXISTS rol        VARCHAR(20) DEFAULT 'jugador';
+ALTER TABLE usuarios_app ADD COLUMN IF NOT EXISTS es_paciente BOOLEAN DEFAULT FALSE;
 """
 
 
@@ -462,6 +555,12 @@ def crear_tablas():
             print("   ✅ índices")
         except Exception as e:
             print(f"   ❌ índices: {e}")
+            raise
+        try:
+            cur.execute(MIGRACIONES)
+            print("   ✅ migraciones incrementales")
+        except Exception as e:
+            print(f"   ❌ migraciones: {e}")
             raise
         conn.commit()
     print("\n✅ Base de datos lista\n")

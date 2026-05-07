@@ -168,11 +168,12 @@ def verify_password(plain: str, hashed: str) -> bool:
     except Exception:
         return False
  
-def crear_token(usuario_id: int, email: str, token_version: int) -> str:
+def crear_token(usuario_id: int, email: str, token_version: int, rol: str = "jugador") -> str:
     payload = {
         "sub":   str(usuario_id),
         "email": email,
         "ver":   token_version,
+        "rol":   rol,
         "exp":   datetime.utcnow() + timedelta(minutes=JWT_MINUTOS),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
@@ -205,6 +206,48 @@ def get_usuario_actual(
     return dict(usuario)
  
  
+def get_profesional_actual(
+    token: Optional[str] = Cookie(default=None),
+    db = Depends(get_db),
+):
+    """Dependencia que exige rol='profesional' en el JWT."""
+    credenciales_error = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Acceso restringido a profesionales",
+    )
+    if not token:
+        raise credenciales_error
+    try:
+        payload    = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+        usuario_id = int(payload.get("sub"))
+        token_ver  = int(payload.get("ver", 1))
+        if payload.get("rol") != "profesional":
+            raise credenciales_error
+    except HTTPException:
+        raise
+    except Exception:
+        raise credenciales_error
+
+    cur = db.cursor()
+    cur.execute(
+        "SELECT * FROM usuarios_app WHERE id = %s AND activo = TRUE",
+        (usuario_id,)
+    )
+    usuario = cur.fetchone()
+    if not usuario or usuario["token_version"] != token_ver:
+        raise credenciales_error
+
+    cur.execute(
+        "SELECT * FROM profesionales WHERE usuario_id = %s AND activo = TRUE",
+        (usuario_id,)
+    )
+    profesional = cur.fetchone()
+    if not profesional:
+        raise credenciales_error
+
+    return {**dict(usuario), "profesional": dict(profesional)}
+
+
 # ══════════════════════════════════════════════════════════════
 #  MODELOS PYDANTIC — validación de entrada y salida
 # ══════════════════════════════════════════════════════════════
@@ -397,6 +440,29 @@ def register(req: RegistroRequest, db = Depends(get_db), response: Response = No
         req.alerta_porcentaje,
     ))
  
+    # Vincular invitaciones pendientes de profesionales para este email
+    email_lower = req.email.lower().strip()
+    cur.execute("""
+        SELECT id, profesional_id FROM invitaciones_pro
+        WHERE email_paciente = %s AND estado = 'pendiente_registro'
+    """, (email_lower,))
+    invitaciones = cur.fetchall()
+    if invitaciones:
+        cur.execute(
+            "UPDATE usuarios_app SET es_paciente = TRUE WHERE id = %s",
+            (usuario_id,)
+        )
+        for inv in invitaciones:
+            cur.execute("""
+                INSERT INTO relaciones_pro_paciente (profesional_id, paciente_id, estado_tratamiento)
+                VALUES (%s, %s, 'evaluacion')
+                ON CONFLICT (profesional_id, paciente_id) DO NOTHING
+            """, (inv["profesional_id"], usuario_id))
+            cur.execute(
+                "UPDATE invitaciones_pro SET estado = 'completada', paciente_id = %s WHERE id = %s",
+                (usuario_id, inv["id"])
+            )
+
     db.commit()
 
     token = crear_token(usuario_id, req.email, 1)
@@ -424,11 +490,13 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db = Depends(get_db), res
             detail="Email o contraseña incorrectos",
         )
  
-    token = crear_token(usuario["id"], usuario["email"], usuario["token_version"])
+    rol   = usuario.get("rol") or "jugador"
+    token = crear_token(usuario["id"], usuario["email"], usuario["token_version"], rol=rol)
     set_auth_cookie(response, token)
     return {
         "game_name": usuario["riot_game_name"],
         "tag_line":  usuario["riot_tag_line"],
+        "rol":       rol,
     }
  
  
@@ -629,6 +697,136 @@ def dashboard(usuario = Depends(get_usuario_actual), db = Depends(get_db)):
     }
  
  
+# ══════════════════════════════════════════════════════════════
+#  ENDPOINTS — CALENDARIO (mes y día)
+# ══════════════════════════════════════════════════════════════
+
+def _mes_data(puuid: str, uid: int, year: int, month: int, cur):
+    """Resumen de actividad por día para un mes dado."""
+    import calendar as _cal
+    primer_dia = date(year, month, 1)
+    ultimo_dia = date(year, month, _cal.monthrange(year, month)[1])
+
+    cur.execute("""
+        SELECT
+            fecha,
+            ROUND(SUM(duracion_min)::numeric / 60, 2) AS horas,
+            COUNT(*) AS partidas,
+            SUM(CASE WHEN rendicion AND resultado='Derrota' THEN 1 ELSE 0 END) AS rendiciones,
+            SUM(CASE WHEN NOT apto_para_progresion THEN 1 ELSE 0 END)          AS afks
+        FROM partidas
+        WHERE puuid = %s AND fecha >= %s AND fecha <= %s
+        GROUP BY fecha
+    """, (puuid, primer_dia, ultimo_dia))
+    dias_db = {str(r["fecha"]): dict(r) for r in cur.fetchall()}
+
+    cur.execute(
+        "SELECT limite_horas_dia FROM objetivos WHERE usuario_id = %s AND activo = TRUE",
+        (uid,)
+    )
+    obj     = cur.fetchone()
+    limite  = float(obj["limite_horas_dia"]) if obj else 0
+
+    dias = []
+    for d in range(1, ultimo_dia.day + 1):
+        fecha = str(date(year, month, d))
+        row   = dias_db.get(fecha)
+        horas = float(row["horas"]) if row else 0
+        pct   = round(horas / limite * 100, 1) if limite > 0 else 0
+        estado = "vacio"
+        if horas > 0:
+            if   pct > 100: estado = "excedido"
+            elif pct >= 75: estado = "warning"
+            else:           estado = "ok"
+        dias.append({
+            "fecha":      fecha,
+            "horas":      horas,
+            "partidas":   int(row["partidas"]) if row else 0,
+            "rendiciones":int(row["rendiciones"]) if row else 0,
+            "afks":       int(row["afks"]) if row else 0,
+            "porcentaje": pct,
+            "estado":     estado,
+        })
+
+    return {"year": year, "month": month, "limite_dia": limite, "dias": dias}
+
+
+def _dia_data(puuid: str, uid: int, fecha_str: str, cur):
+    """Detalle de partidas de un día concreto."""
+    try:
+        fecha_obj = date.fromisoformat(fecha_str)
+    except ValueError:
+        raise HTTPException(400, detail="Formato de fecha inválido (YYYY-MM-DD)")
+
+    cur.execute("""
+        SELECT campeon, modo, resultado, kda, duracion_min,
+               hora_inicio, rendicion, apto_para_progresion
+        FROM partidas
+        WHERE puuid = %s AND fecha = %s
+        ORDER BY hora_inicio ASC
+    """, (puuid, fecha_obj))
+    partidas = [dict(r) for r in cur.fetchall()]
+
+    horas = sum(float(p["duracion_min"]) for p in partidas) / 60
+    cur.execute(
+        "SELECT limite_horas_dia FROM objetivos WHERE usuario_id = %s AND activo = TRUE",
+        (uid,)
+    )
+    obj    = cur.fetchone()
+    limite = float(obj["limite_horas_dia"]) if obj else 0
+    pct    = round(horas / limite * 100, 1) if limite > 0 else 0
+
+    return {
+        "fecha":      fecha_str,
+        "horas":      round(horas, 2),
+        "partidas":   len(partidas),
+        "limite":     limite,
+        "porcentaje": pct,
+        "matches": [
+            {
+                "campeon":            p["campeon"],
+                "modo":               p["modo"],
+                "resultado":          p["resultado"],
+                "kda":                float(p["kda"] or 0),
+                "duracion_min":       float(p["duracion_min"]),
+                "hora":               str(p["hora_inicio"])[:5],
+                "rendicion_negativa": p["rendicion"] and p["resultado"] == "Derrota",
+                "rendicion_positiva": p["rendicion"] and p["resultado"] == "Victoria",
+                "afk":                not p["apto_para_progresion"],
+            }
+            for p in partidas
+        ],
+    }
+
+
+@app.get("/dashboard/mes", summary="Resumen de actividad mensual para el calendario")
+def dashboard_mes(
+    year:    int = None,
+    month:   int = None,
+    usuario  = Depends(get_usuario_actual),
+    db       = Depends(get_db),
+):
+    hoy = date.today()
+    y   = year  or hoy.year
+    m   = month or hoy.month
+    puuid = usuario.get("puuid")
+    if not puuid:
+        return {"year": y, "month": m, "limite_dia": 0, "dias": []}
+    return _mes_data(puuid, usuario["id"], y, m, db.cursor())
+
+
+@app.get("/dashboard/dia", summary="Detalle de partidas de un día concreto")
+def dashboard_dia(
+    fecha:   str,
+    usuario  = Depends(get_usuario_actual),
+    db       = Depends(get_db),
+):
+    puuid = usuario.get("puuid")
+    if not puuid:
+        return {"fecha": fecha, "horas": 0, "partidas": 0, "limite": 0, "porcentaje": 0, "matches": []}
+    return _dia_data(puuid, usuario["id"], fecha, db.cursor())
+
+
 # ══════════════════════════════════════════════════════════════
 #  ENDPOINTS — HISTORIAL
 # ══════════════════════════════════════════════════════════════
@@ -1588,6 +1786,597 @@ def sync_me(usuario = Depends(get_usuario_actual), db = Depends(get_db)):
         "message":  "Sincronización iniciada. Los datos aparecerán en el dashboard en unos minutos.",
         "en_curso": True,
     }
+
+
+# ══════════════════════════════════════════════════════════════
+#  ENDPOINTS — PROFESIONALES (B2B)
+# ══════════════════════════════════════════════════════════════
+
+import secrets as _secrets
+
+_ESTADOS_TRATAMIENTO = ["evaluacion", "tratamiento_activo", "seguimiento", "alta"]
+
+# ── Modelos ────────────────────────────────────────────────────
+
+class ProRegistroRequest(BaseModel):
+    email:              EmailStr
+    password:           str
+    nombre:             str
+    apellidos:          str
+    numero_colegiado:   str
+    especialidad:       str
+    consentimiento_datos: bool = False
+
+    @field_validator("password")
+    @classmethod
+    def pwd_min(cls, v):
+        if len(v) < 8:
+            raise ValueError("La contraseña debe tener al menos 8 caracteres")
+        return v
+
+    @field_validator("consentimiento_datos")
+    @classmethod
+    def debe_aceptar(cls, v):
+        if not v:
+            raise ValueError("Debes aceptar el tratamiento de datos")
+        return v
+
+class NotaRequest(BaseModel):
+    contenido: str
+
+class EstadoRequest(BaseModel):
+    estado: str
+
+    @field_validator("estado")
+    @classmethod
+    def estado_valido(cls, v):
+        if v not in _ESTADOS_TRATAMIENTO:
+            raise ValueError(f"Estado debe ser uno de: {_ESTADOS_TRATAMIENTO}")
+        return v
+
+
+# ── Registro y perfil ──────────────────────────────────────────
+
+@app.post("/pro/registro", summary="Registro de profesional sanitario")
+def pro_registro(req: ProRegistroRequest, response: Response, db = Depends(get_db)):
+    cur = db.cursor()
+    cur.execute("SELECT id FROM usuarios_app WHERE email = %s", (req.email.lower(),))
+    if cur.fetchone():
+        raise HTTPException(409, detail="Este email ya está registrado")
+
+    pwd_hash   = hash_password(req.password)
+    link_token = _secrets.token_urlsafe(32)
+
+    cur.execute("""
+        INSERT INTO usuarios_app (
+            email, riot_game_name, riot_tag_line, password_hash,
+            consentimiento_datos, fecha_consentimiento, activo, rol
+        ) VALUES (%s, %s, %s, %s, %s, NOW(), TRUE, 'profesional')
+        RETURNING id, token_version
+    """, (req.email.lower(), f"{req.nombre} {req.apellidos}"[:50], "PRO", pwd_hash, req.consentimiento_datos))
+    row        = cur.fetchone()
+    usuario_id = row["id"]
+
+    cur.execute("""
+        INSERT INTO profesionales (usuario_id, nombre, apellidos, numero_colegiado, especialidad, link_token)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING id
+    """, (usuario_id, req.nombre.strip(), req.apellidos.strip(),
+          req.numero_colegiado.strip(), req.especialidad.strip(), link_token))
+
+    db.commit()
+    token = crear_token(usuario_id, req.email.lower(), row["token_version"], rol="profesional")
+    set_auth_cookie(response, token)
+    log.info(f"Nuevo profesional registrado: {req.email}")
+    return {"ok": True, "email": req.email.lower(), "rol": "profesional"}
+
+
+@app.get("/pro/me", summary="Perfil del profesional autenticado")
+def pro_me(ctx = Depends(get_profesional_actual)):
+    pro = ctx["profesional"]
+    return {
+        "id":                pro["id"],
+        "nombre":            pro["nombre"],
+        "apellidos":         pro["apellidos"],
+        "email":             ctx["email"],
+        "especialidad":      pro["especialidad"],
+        "numero_colegiado":  pro["numero_colegiado"],
+        "verificado":        pro["verificado"],
+        "link_token":        pro["link_token"],
+    }
+
+
+# ── Invitación ─────────────────────────────────────────────────
+
+@app.get("/invitacion/{token}", summary="Info pública del profesional para la página de invitación")
+def invitacion_info(token: str, db = Depends(get_db)):
+    cur = db.cursor()
+    cur.execute("""
+        SELECT p.nombre, p.apellidos, p.especialidad
+        FROM profesionales p
+        WHERE p.link_token = %s AND p.activo = TRUE
+    """, (token,))
+    pro = cur.fetchone()
+    if not pro:
+        raise HTTPException(404, detail="Enlace de invitación no válido o expirado")
+    return {
+        "nombre":      pro["nombre"],
+        "apellidos":   pro["apellidos"],
+        "especialidad":pro["especialidad"],
+    }
+
+
+class AceptarInvitacionRequest(BaseModel):
+    email:                 EmailStr
+    riot_game_name:        str
+    riot_tag_line:         str
+    consentimiento_datos:  bool
+    consentimiento_emails: bool = False
+
+    @field_validator("consentimiento_datos")
+    @classmethod
+    def debe_aceptar(cls, v):
+        if not v:
+            raise ValueError("El consentimiento de datos es obligatorio")
+        return v
+
+
+@app.post("/invitacion/{token}/aceptar", summary="Paciente acepta la invitación del profesional")
+def invitacion_aceptar(token: str, data: AceptarInvitacionRequest, db = Depends(get_db)):
+    """
+    NO crea cuenta de usuario. Solo guarda los datos en invitaciones_pro como
+    'pendiente_registro'. Cuando el paciente complete el registro con el mismo
+    email, se crea la relación automáticamente.
+    """
+    cur = db.cursor()
+
+    cur.execute(
+        "SELECT id FROM profesionales WHERE link_token = %s AND activo = TRUE",
+        (token,)
+    )
+    pro = cur.fetchone()
+    if not pro:
+        raise HTTPException(404, detail="Enlace de invitación no válido")
+
+    email = data.email.lower().strip()
+
+    # Guardar invitación pendiente (upsert por si repite el formulario)
+    cur.execute("""
+        INSERT INTO invitaciones_pro
+            (profesional_id, token, email_paciente, riot_game_name, riot_tag_line, estado)
+        VALUES (%s, %s, %s, %s, %s, 'pendiente_registro')
+        ON CONFLICT (token) DO UPDATE SET
+            email_paciente  = EXCLUDED.email_paciente,
+            riot_game_name  = EXCLUDED.riot_game_name,
+            riot_tag_line   = EXCLUDED.riot_tag_line,
+            estado          = 'pendiente_registro'
+    """, (
+        pro["id"], token, email,
+        data.riot_game_name.strip(),
+        data.riot_tag_line.strip().lstrip("#"),
+    ))
+
+    # Si el paciente ya tiene cuenta, vincular directamente
+    cur.execute("SELECT id FROM usuarios_app WHERE email = %s", (email,))
+    existing = cur.fetchone()
+    if existing:
+        cur.execute(
+            "UPDATE usuarios_app SET es_paciente = TRUE WHERE id = %s",
+            (existing["id"],)
+        )
+        cur.execute("""
+            INSERT INTO relaciones_pro_paciente (profesional_id, paciente_id, estado_tratamiento)
+            VALUES (%s, %s, 'evaluacion')
+            ON CONFLICT (profesional_id, paciente_id) DO NOTHING
+        """, (pro["id"], existing["id"]))
+        cur.execute(
+            "UPDATE invitaciones_pro SET estado = 'completada', paciente_id = %s WHERE token = %s",
+            (existing["id"], token)
+        )
+
+    db.commit()
+    log.info(f"Invitación pendiente: pro_id={pro['id']} email={email}")
+    return {"ok": True}
+
+
+# ── Lista de pacientes ──────────────────────────────────────────
+
+@app.get("/pro/pacientes", summary="Lista de pacientes del profesional")
+def pro_pacientes(ctx = Depends(get_profesional_actual), db = Depends(get_db)):
+    cur = db.cursor()
+    cur.execute("""
+        SELECT
+            u.id,
+            u.riot_game_name,
+            u.riot_tag_line,
+            u.email,
+            u.ultima_sincronizacion,
+            u.puuid,
+            r.id                  AS relacion_id,
+            r.estado_tratamiento,
+            r.fecha_inicio,
+            r.fecha_alta,
+            r.activo              AS relacion_activa,
+            -- Última partida
+            (SELECT MAX(p.fecha) FROM partidas p WHERE p.puuid = u.puuid) AS ultima_partida,
+            -- Horas última semana
+            (SELECT COALESCE(ROUND(SUM(p.duracion_min)::numeric / 60, 1), 0)
+             FROM partidas p
+             WHERE p.puuid = u.puuid
+               AND p.fecha >= CURRENT_DATE - INTERVAL '7 days') AS horas_semana,
+            -- Wellbeing score (último progreso diario disponible)
+            (SELECT pd.porcentaje_consumido_dia
+             FROM progreso_diario pd
+             WHERE pd.usuario_id = u.id
+             ORDER BY pd.fecha DESC LIMIT 1) AS ultimo_pct_limite
+        FROM relaciones_pro_paciente r
+        JOIN usuarios_app u ON u.id = r.paciente_id
+        WHERE r.profesional_id = %s
+        ORDER BY r.estado_tratamiento, u.riot_game_name
+    """, (ctx["profesional"]["id"],))
+
+    pacientes = []
+    for row in cur.fetchall():
+        r = dict(row)
+        pacientes.append({
+            "id":                 r["id"],
+            "riot_game_name":     r["riot_game_name"],
+            "riot_tag_line":      r["riot_tag_line"],
+            "email":              r["email"],
+            "relacion_id":        r["relacion_id"],
+            "estado_tratamiento": r["estado_tratamiento"],
+            "fecha_inicio":       str(r["fecha_inicio"])[:10] if r["fecha_inicio"] else None,
+            "fecha_alta":         str(r["fecha_alta"])[:10] if r["fecha_alta"] else None,
+            "activo":             r["relacion_activa"],
+            "ultima_partida":     str(r["ultima_partida"]) if r["ultima_partida"] else None,
+            "horas_semana":       float(r["horas_semana"] or 0),
+            "sincronizado":       r["puuid"] is not None,
+            "ultimo_pct_limite":  float(r["ultimo_pct_limite"] or 0),
+        })
+    return {"pacientes": pacientes}
+
+
+# ── Detalle del paciente (reutiliza lógica existente) ──────────
+
+def _verificar_acceso_paciente(profesional_id: int, paciente_id: int, cur):
+    cur.execute("""
+        SELECT r.id, r.estado_tratamiento, r.activo
+        FROM relaciones_pro_paciente r
+        WHERE r.profesional_id = %s AND r.paciente_id = %s
+    """, (profesional_id, paciente_id))
+    rel = cur.fetchone()
+    if not rel:
+        raise HTTPException(403, detail="No tienes acceso a este paciente")
+    return dict(rel)
+
+
+@app.get("/pro/pacientes/{paciente_id}/mes", summary="Calendario mensual del paciente")
+def pro_paciente_mes(
+    paciente_id: int,
+    year:  int = None,
+    month: int = None,
+    ctx = Depends(get_profesional_actual),
+    db  = Depends(get_db),
+):
+    cur = db.cursor()
+    _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+    cur.execute("SELECT * FROM usuarios_app WHERE id = %s AND activo = TRUE", (paciente_id,))
+    paciente = cur.fetchone()
+    if not paciente:
+        raise HTTPException(404, detail="Paciente no encontrado")
+    puuid = paciente["puuid"]
+    if not puuid:
+        hoy = date.today()
+        return {"year": year or hoy.year, "month": month or hoy.month, "limite_dia": 0, "dias": []}
+    hoy = date.today()
+    return _mes_data(puuid, paciente_id, year or hoy.year, month or hoy.month, cur)
+
+
+@app.get("/pro/pacientes/{paciente_id}/dia", summary="Detalle de un día concreto del paciente")
+def pro_paciente_dia(
+    paciente_id: int,
+    fecha: str,
+    ctx = Depends(get_profesional_actual),
+    db  = Depends(get_db),
+):
+    cur = db.cursor()
+    _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+    cur.execute("SELECT * FROM usuarios_app WHERE id = %s AND activo = TRUE", (paciente_id,))
+    paciente = cur.fetchone()
+    if not paciente or not paciente["puuid"]:
+        return {"fecha": fecha, "horas": 0, "partidas": 0, "limite": 0, "porcentaje": 0, "matches": []}
+    return _dia_data(paciente["puuid"], paciente_id, fecha, cur)
+
+
+@app.get("/pro/pacientes/{paciente_id}/historial", summary="Historial de partidas del paciente visto por el profesional")
+def pro_paciente_historial(
+    paciente_id:  int,
+    dias:         int          = 30,
+    limit:        int          = 50,
+    offset:       int          = 0,
+    fecha_inicio: Optional[str] = None,
+    fecha_fin:    Optional[str] = None,
+    ctx = Depends(get_profesional_actual),
+    db  = Depends(get_db),
+):
+    cur = db.cursor()
+    _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+    cur.execute("SELECT * FROM usuarios_app WHERE id = %s AND activo = TRUE", (paciente_id,))
+    paciente = cur.fetchone()
+    if not paciente:
+        raise HTTPException(404, detail="Paciente no encontrado")
+    return historial(
+        dias=dias, limit=limit, offset=offset,
+        fecha_inicio=fecha_inicio, fecha_fin=fecha_fin,
+        usuario=dict(paciente), db=db,
+    )
+
+
+@app.get("/pro/pacientes/{paciente_id}/analisis", summary="Análisis del paciente visto por el profesional")
+def pro_paciente_analisis(
+    paciente_id:  int,
+    dias:         int          = 30,
+    fecha_inicio: Optional[str] = None,
+    fecha_fin_p:  Optional[str] = None,
+    ctx = Depends(get_profesional_actual),
+    db  = Depends(get_db),
+):
+    cur = db.cursor()
+    _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+    cur.execute("SELECT * FROM usuarios_app WHERE id = %s AND activo = TRUE", (paciente_id,))
+    paciente = cur.fetchone()
+    if not paciente:
+        raise HTTPException(404, detail="Paciente no encontrado")
+    return stats_analisis(
+        dias=dias, fecha_inicio=fecha_inicio, fecha_fin_p=fecha_fin_p,
+        usuario=dict(paciente), db=db,
+    )
+
+
+@app.get("/pro/pacientes/{paciente_id}/rank-historia", summary="Historial de LP del paciente")
+def pro_paciente_rank_historia(
+    paciente_id: int,
+    dias:        int = 60,
+    ctx = Depends(get_profesional_actual),
+    db  = Depends(get_db),
+):
+    cur = db.cursor()
+    _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+    cur.execute("SELECT * FROM usuarios_app WHERE id = %s AND activo = TRUE", (paciente_id,))
+    paciente = cur.fetchone()
+    if not paciente:
+        raise HTTPException(404, detail="Paciente no encontrado")
+    return rank_historia(dias=dias, usuario=dict(paciente), db=db)
+
+
+@app.get("/pro/pacientes/{paciente_id}/dashboard", summary="Dashboard del paciente visto por el profesional")
+def pro_paciente_dashboard(
+    paciente_id: int,
+    ctx = Depends(get_profesional_actual),
+    db  = Depends(get_db),
+):
+    cur = db.cursor()
+    _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+
+    # Reutilizamos la misma query del dashboard normal, pero para este paciente
+    cur.execute("SELECT * FROM usuarios_app WHERE id = %s AND activo = TRUE", (paciente_id,))
+    paciente = cur.fetchone()
+    if not paciente:
+        raise HTTPException(404, detail="Paciente no encontrado")
+
+    # Delegamos al endpoint de dashboard pasando el usuario del paciente
+    # (inyectamos el usuario manualmente en lugar de usar la cookie)
+    from datetime import date, timedelta
+    puuid = paciente["puuid"]
+    uid   = paciente["id"]
+
+    if not puuid:
+        return {"sincronizado": False, "nombre": paciente["riot_game_name"]}
+
+    lunes = date.today() - timedelta(days=date.today().weekday())
+
+    cur.execute("""
+        SELECT
+            COALESCE(ROUND(SUM(duracion_min)::numeric/60,2),0) AS horas_hoy,
+            COALESCE(COUNT(*),0) AS partidas_hoy,
+            COALESCE(SUM(CASE WHEN rendicion AND resultado='Derrota' THEN 1 ELSE 0 END),0) AS rendiciones_hoy,
+            COALESCE(SUM(CASE WHEN NOT apto_para_progresion THEN 1 ELSE 0 END),0) AS afks_hoy
+        FROM partidas WHERE puuid = %s AND fecha = CURRENT_DATE
+    """, (puuid,))
+    hoy = dict(cur.fetchone())
+
+    cur.execute("""
+        SELECT COALESCE(ROUND(SUM(duracion_min)::numeric/60,2),0) AS horas
+        FROM partidas WHERE puuid = %s AND fecha >= %s AND fecha <= CURRENT_DATE
+    """, (puuid, lunes))
+    horas_semana = float(cur.fetchone()["horas"])
+
+    cur.execute("""
+        SELECT limite_horas_dia, limite_horas_semana FROM objetivos
+        WHERE usuario_id = %s AND activo = TRUE
+    """, (uid,))
+    obj = dict(cur.fetchone() or {})
+    limite_d = float(obj.get("limite_horas_dia") or 0)
+    limite_s = float(obj.get("limite_horas_semana") or 0)
+
+    cur.execute("""
+        SELECT fecha, ROUND(SUM(duracion_min)::numeric/60,2) AS horas, COUNT(*) AS partidas
+        FROM partidas WHERE puuid = %s AND fecha >= %s AND fecha <= CURRENT_DATE
+        GROUP BY fecha ORDER BY fecha
+    """, (puuid, lunes))
+    dias_semana = [dict(r) for r in cur.fetchall()]
+
+    cur.execute("""
+        SELECT racha_dias_cumplidos, racha_maxima_historica FROM progreso_diario
+        WHERE usuario_id = %s ORDER BY fecha DESC LIMIT 1
+    """, (uid,))
+    racha_row = cur.fetchone()
+    racha     = int(racha_row["racha_dias_cumplidos"] if racha_row else 0)
+
+    cur.execute("""
+        SELECT campeon, modo, resultado, kda, duracion_min, rendicion,
+               apto_para_progresion, fecha, hora_inicio
+        FROM partidas WHERE puuid = %s ORDER BY fecha DESC, hora_inicio DESC LIMIT 10
+    """, (puuid,))
+    ultimas = [dict(r) for r in cur.fetchall()]
+
+    cur.execute("""
+        SELECT tier, division, lp, victorias, derrotas
+        FROM ranked_info WHERE puuid = %s AND queue_type = 'RANKED_SOLO_5x5'
+    """, (puuid,))
+    ranked = dict(cur.fetchone() or {})
+
+    horas_hoy = float(hoy["horas_hoy"])
+    pct_dia   = round(horas_hoy / limite_d * 100, 1) if limite_d > 0 else 0
+
+    return {
+        "sincronizado": True,
+        "nombre":       paciente["riot_game_name"],
+        "tag":          paciente["riot_tag_line"],
+        "email":        paciente["email"],
+        "hoy": {
+            "horas":       horas_hoy,
+            "partidas":    int(hoy["partidas_hoy"]),
+            "rendiciones": int(hoy["rendiciones_hoy"]),
+            "afks":        int(hoy["afks_hoy"]),
+        },
+        "semana": {
+            "horas":      horas_semana,
+            "porcentaje": round(horas_semana / limite_s * 100, 1) if limite_s else 0,
+            "dias":       dias_semana,
+        },
+        "objetivo": {
+            "limite_dia":     limite_d,
+            "limite_semana":  limite_s,
+            "porcentaje_dia": pct_dia,
+        },
+        "racha":            racha,
+        "ranked":           ranked,
+        "ultimas_partidas": [
+            {
+                "campeon":          r["campeon"],
+                "modo":             r["modo"],
+                "resultado":        r["resultado"],
+                "kda":              float(r["kda"] or 0),
+                "duracion_min":     float(r["duracion_min"]),
+                "rendicion_negativa": r["rendicion"] and r["resultado"] == "Derrota",
+                "rendicion_positiva": r["rendicion"] and r["resultado"] == "Victoria",
+                "afk":              not r["apto_para_progresion"],
+                "fecha":            str(r["fecha"]),
+            }
+            for r in ultimas
+        ],
+    }
+
+
+@app.patch("/pro/pacientes/{paciente_id}/estado", summary="Actualizar estado de tratamiento del paciente")
+def pro_actualizar_estado(
+    paciente_id: int,
+    body: EstadoRequest,
+    ctx = Depends(get_profesional_actual),
+    db  = Depends(get_db),
+):
+    cur = db.cursor()
+    _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+    fecha_alta = "NOW()" if body.estado == "alta" else "NULL"
+    cur.execute(f"""
+        UPDATE relaciones_pro_paciente
+        SET estado_tratamiento = %s,
+            fecha_alta = {fecha_alta},
+            activo = %s
+        WHERE profesional_id = %s AND paciente_id = %s
+    """, (
+        body.estado,
+        body.estado != "alta",
+        ctx["profesional"]["id"],
+        paciente_id,
+    ))
+    db.commit()
+    return {"ok": True, "estado": body.estado}
+
+
+# ── Notas del profesional sobre el paciente ────────────────────
+
+@app.get("/pro/pacientes/{paciente_id}/notas", summary="Listar notas del profesional sobre un paciente")
+def pro_notas_list(
+    paciente_id: int,
+    ctx = Depends(get_profesional_actual),
+    db  = Depends(get_db),
+):
+    cur = db.cursor()
+    rel = _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+    cur.execute("""
+        SELECT id, contenido, creada_en, editada_en
+        FROM notas_profesional
+        WHERE relacion_id = %s
+        ORDER BY creada_en DESC
+    """, (rel["id"],))
+    return {
+        "notas": [
+            {
+                "id":        r["id"],
+                "contenido": r["contenido"],
+                "creada_en": r["creada_en"].isoformat() if r["creada_en"] else None,
+                "editada_en":r["editada_en"].isoformat() if r["editada_en"] else None,
+            }
+            for r in cur.fetchall()
+        ]
+    }
+
+
+@app.post("/pro/pacientes/{paciente_id}/notas", summary="Añadir nota sobre un paciente")
+def pro_notas_crear(
+    paciente_id: int,
+    body: NotaRequest,
+    ctx = Depends(get_profesional_actual),
+    db  = Depends(get_db),
+):
+    cur = db.cursor()
+    rel = _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+    cur.execute(
+        "INSERT INTO notas_profesional (relacion_id, contenido) VALUES (%s, %s) RETURNING id, creada_en",
+        (rel["id"], body.contenido.strip())
+    )
+    row = cur.fetchone()
+    db.commit()
+    return {"id": row["id"], "creada_en": row["creada_en"].isoformat()}
+
+
+@app.put("/pro/pacientes/{paciente_id}/notas/{nota_id}", summary="Editar nota")
+def pro_notas_editar(
+    paciente_id: int,
+    nota_id: int,
+    body: NotaRequest,
+    ctx = Depends(get_profesional_actual),
+    db  = Depends(get_db),
+):
+    cur = db.cursor()
+    rel = _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+    cur.execute("""
+        UPDATE notas_profesional SET contenido = %s, editada_en = NOW()
+        WHERE id = %s AND relacion_id = %s
+    """, (body.contenido.strip(), nota_id, rel["id"]))
+    if cur.rowcount == 0:
+        raise HTTPException(404, detail="Nota no encontrada")
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete("/pro/pacientes/{paciente_id}/notas/{nota_id}", summary="Eliminar nota")
+def pro_notas_borrar(
+    paciente_id: int,
+    nota_id: int,
+    ctx = Depends(get_profesional_actual),
+    db  = Depends(get_db),
+):
+    cur = db.cursor()
+    rel = _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+    cur.execute(
+        "DELETE FROM notas_profesional WHERE id = %s AND relacion_id = %s",
+        (nota_id, rel["id"])
+    )
+    db.commit()
+    return {"ok": True}
 
 
 # ══════════════════════════════════════════════════════════════

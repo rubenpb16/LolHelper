@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { dashboard, stats, sync } from '../api'
+import CalendarioMes from '../components/CalendarioMes'
 
 function fmt(horas) {
   const h = Math.floor(horas)
@@ -357,6 +358,16 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* Calendario mensual */}
+      <div className="card" style={{ marginBottom: 20 }}>
+        <p className="section-title" style={{ marginBottom: 16 }}>Calendario de actividad</p>
+        <CalendarioMes
+          dark={true}
+          fetchMes={(y, m) => dashboard.mes(y, m)}
+          fetchDia={(f)    => dashboard.dia(f)}
+        />
+      </div>
 
       {/* Señales de comportamiento */}
       {behavior?.señales_comportamiento?.length > 0 && (
