@@ -269,9 +269,21 @@ export default function ProPacienteDetalle() {
         <div style={s.cabecera}>
           <button style={s.back} onClick={() => navigate('/pro/dashboard')}>← Volver</button>
           <div style={s.pacienteInfo}>
-            <div style={s.avatar}>{nombre?.charAt(0)?.toUpperCase()}</div>
+            <div style={s.avatar}>
+              {(dashData?.nombre_real || nombre)?.charAt(0)?.toUpperCase()}
+            </div>
             <div>
-              <h1 style={s.h1}>{nombre}<span style={s.tag}>#{tag}</span></h1>
+              {dashData?.nombre_real
+                ? <>
+                    <h1 style={s.h1}>
+                      {dashData.nombre_real} {dashData.apellidos_real}
+                    </h1>
+                    <p style={{ fontSize: 13, color: '#64748b', marginBottom: 2 }}>
+                      {nombre}<span style={{ color: '#94a3b8' }}>#{tag}</span>
+                    </p>
+                  </>
+                : <h1 style={s.h1}>{nombre}<span style={s.tag}>#{tag}</span></h1>
+              }
               <p style={s.sub}>{email}</p>
               {ranked?.tier && (
                 <span style={{ fontSize: 13, color: '#2563eb', fontWeight: 500 }}>

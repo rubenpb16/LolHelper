@@ -527,14 +527,18 @@ CREATE INDEX IF NOT EXISTS idx_notas_relacion         ON notas_profesional(relac
 
 # Migración incremental: añade columnas a usuarios_app si no existen aún
 MIGRACIONES = """
-ALTER TABLE usuarios_app      ADD COLUMN IF NOT EXISTS rol        VARCHAR(20) DEFAULT 'jugador';
-ALTER TABLE usuarios_app      ADD COLUMN IF NOT EXISTS es_paciente BOOLEAN     DEFAULT FALSE;
-ALTER TABLE notas_profesional ADD COLUMN IF NOT EXISTS categoria   VARCHAR(30) DEFAULT 'observacion';
+ALTER TABLE usuarios_app      ADD COLUMN IF NOT EXISTS rol           VARCHAR(20)  DEFAULT 'jugador';
+ALTER TABLE usuarios_app      ADD COLUMN IF NOT EXISTS es_paciente   BOOLEAN      DEFAULT FALSE;
+ALTER TABLE usuarios_app      ADD COLUMN IF NOT EXISTS nombre_real   VARCHAR(100);
+ALTER TABLE usuarios_app      ADD COLUMN IF NOT EXISTS apellidos_real VARCHAR(100);
+ALTER TABLE notas_profesional ADD COLUMN IF NOT EXISTS categoria      VARCHAR(30)  DEFAULT 'observacion';
+ALTER TABLE invitaciones_pro  ADD COLUMN IF NOT EXISTS nombre_paciente   VARCHAR(100);
+ALTER TABLE invitaciones_pro  ADD COLUMN IF NOT EXISTS apellidos_paciente VARCHAR(100);
 ALTER TABLE invitaciones_pro  DROP CONSTRAINT IF EXISTS invitaciones_pro_token_key;
 DO $$ BEGIN
     ALTER TABLE invitaciones_pro ADD CONSTRAINT inv_pro_paciente_unique
         UNIQUE (profesional_id, email_paciente);
-EXCEPTION WHEN duplicate_object THEN NULL;
+EXCEPTION WHEN duplicate_table OR duplicate_object THEN NULL;
 END $$;
 """
 

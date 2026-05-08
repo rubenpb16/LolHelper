@@ -136,7 +136,12 @@ export default function ProDashboard() {
                     onClick={() => navigate(`/pro/pacientes/${p.id}`)}
                   >
                     <td style={s.td}>
-                      <div style={{ fontWeight: 600, color: '#1e293b' }}>
+                      {p.nombre_real && (
+                        <div style={{ fontWeight: 600, color: '#1e293b', marginBottom: 2 }}>
+                          {p.nombre_real} {p.apellidos_real}
+                        </div>
+                      )}
+                      <div style={{ fontWeight: p.nombre_real ? 400 : 600, color: p.nombre_real ? '#64748b' : '#1e293b', fontSize: p.nombre_real ? 12 : 14 }}>
                         {p.riot_game_name}<span style={{ color: '#94a3b8', fontWeight: 400 }}>#{p.riot_tag_line}</span>
                       </div>
                       <div style={{ fontSize: 12, color: '#94a3b8' }}>{p.email}</div>

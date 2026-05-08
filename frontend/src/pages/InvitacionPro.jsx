@@ -8,6 +8,7 @@ export default function InvitacionPro() {
   const [pro,       setPro]       = useState(null)
   const [loadError, setLoadError] = useState('')
   const [form,      setForm]      = useState({
+    nombre: '', apellidos: '',
     riot_game_name: '', riot_tag_line: '', email: '',
     consentimiento_datos: false, consentimiento_emails: false,
   })
@@ -110,6 +111,22 @@ export default function InvitacionPro() {
         {error && <div style={s.alertError}>{error}</div>}
 
         <form onSubmit={handleSubmit}>
+          {/* Nombre real */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 18 }}>
+            <div>
+              <label style={s.label}>Nombre</label>
+              <input style={s.input} required placeholder="Rubén"
+                value={form.nombre}
+                onChange={e => setForm({ ...form, nombre: e.target.value })} />
+            </div>
+            <div>
+              <label style={s.label}>Apellidos</label>
+              <input style={s.input} required placeholder="García López"
+                value={form.apellidos}
+                onChange={e => setForm({ ...form, apellidos: e.target.value })} />
+            </div>
+          </div>
+
           {/* Cuenta Riot */}
           <div style={s.group}>
             <label style={s.label}>Tu cuenta de Riot</label>

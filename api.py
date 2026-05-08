@@ -448,9 +448,12 @@ def register(req: RegistroRequest, db = Depends(get_db), response: Response = No
     """, (email_lower,))
     invitaciones = cur.fetchall()
     if invitaciones:
+        # Tomar nombre real de la primera invitación que lo tenga
+        nombre_inv    = next((i["nombre_paciente"]    for i in invitaciones if i.get("nombre_paciente")),    None)
+        apellidos_inv = next((i["apellidos_paciente"] for i in invitaciones if i.get("apellidos_paciente")), None)
         cur.execute(
-            "UPDATE usuarios_app SET es_paciente = TRUE WHERE id = %s",
-            (usuario_id,)
+            "UPDATE usuarios_app SET es_paciente = TRUE, nombre_real = COALESCE(%s, nombre_real), apellidos_real = COALESCE(%s, apellidos_real) WHERE id = %s",
+            (nombre_inv, apellidos_inv, usuario_id)
         )
         for inv in invitaciones:
             cur.execute("""
@@ -1917,6 +1920,8 @@ def invitacion_info(token: str, db = Depends(get_db)):
 
 
 class AceptarInvitacionRequest(BaseModel):
+    nombre:                str
+    apellidos:             str
     email:                 EmailStr
     riot_game_name:        str
     riot_tag_line:         str
@@ -1928,6 +1933,14 @@ class AceptarInvitacionRequest(BaseModel):
     def debe_aceptar(cls, v):
         if not v:
             raise ValueError("El consentimiento de datos es obligatorio")
+        return v
+
+    @field_validator("nombre", "apellidos")
+    @classmethod
+    def no_vacio(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("Este campo no puede estar vacío")
         return v
 
 
@@ -1952,28 +1965,35 @@ def invitacion_aceptar(token: str, data: AceptarInvitacionRequest, db = Depends(
 
     # Upsert por (profesional_id, email_paciente) — evita duplicados si el paciente
     # vuelve a rellenar el formulario, sin colisionar con otras invitaciones del mismo pro
+    nombre    = data.nombre.strip()
+    apellidos = data.apellidos.strip()
+
     inv_token = _secrets.token_urlsafe(16)
     cur.execute("""
         INSERT INTO invitaciones_pro
-            (profesional_id, token, email_paciente, riot_game_name, riot_tag_line, estado)
-        VALUES (%s, %s, %s, %s, %s, 'pendiente_registro')
+            (profesional_id, token, email_paciente, riot_game_name, riot_tag_line,
+             nombre_paciente, apellidos_paciente, estado)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'pendiente_registro')
         ON CONFLICT (profesional_id, email_paciente) DO UPDATE SET
-            riot_game_name = EXCLUDED.riot_game_name,
-            riot_tag_line  = EXCLUDED.riot_tag_line,
-            estado         = 'pendiente_registro'
+            riot_game_name     = EXCLUDED.riot_game_name,
+            riot_tag_line      = EXCLUDED.riot_tag_line,
+            nombre_paciente    = EXCLUDED.nombre_paciente,
+            apellidos_paciente = EXCLUDED.apellidos_paciente,
+            estado             = 'pendiente_registro'
     """, (
         pro["id"], inv_token, email,
         data.riot_game_name.strip(),
         data.riot_tag_line.strip().lstrip("#"),
+        nombre, apellidos,
     ))
 
-    # Si el paciente ya tiene cuenta, vincular directamente
+    # Si el paciente ya tiene cuenta, vincular directamente y actualizar nombre real
     cur.execute("SELECT id FROM usuarios_app WHERE email = %s", (email,))
     existing = cur.fetchone()
     if existing:
         cur.execute(
-            "UPDATE usuarios_app SET es_paciente = TRUE WHERE id = %s",
-            (existing["id"],)
+            "UPDATE usuarios_app SET es_paciente = TRUE, nombre_real = %s, apellidos_real = %s WHERE id = %s",
+            (nombre, apellidos, existing["id"])
         )
         cur.execute("""
             INSERT INTO relaciones_pro_paciente (profesional_id, paciente_id, estado_tratamiento)
@@ -2034,6 +2054,8 @@ def pro_pacientes(ctx = Depends(get_profesional_actual), db = Depends(get_db)):
             u.riot_game_name,
             u.riot_tag_line,
             u.email,
+            u.nombre_real,
+            u.apellidos_real,
             u.ultima_sincronizacion,
             u.puuid,
             r.id                  AS relacion_id,
@@ -2089,6 +2111,9 @@ def pro_pacientes(ctx = Depends(get_profesional_actual), db = Depends(get_db)):
             "id":                 r["id"],
             "riot_game_name":     r["riot_game_name"],
             "riot_tag_line":      r["riot_tag_line"],
+            "nombre_real":        r["nombre_real"] or "",
+            "apellidos_real":     r["apellidos_real"] or "",
+            "nombre_display":     f"{r['nombre_real']} {r['apellidos_real']}".strip() if r["nombre_real"] else r["riot_game_name"],
             "email":              r["email"],
             "relacion_id":        r["relacion_id"],
             "estado_tratamiento": r["estado_tratamiento"],
@@ -2503,10 +2528,13 @@ def pro_paciente_dashboard(
     pct_dia   = round(horas_hoy / limite_d * 100, 1) if limite_d > 0 else 0
 
     return {
-        "sincronizado": True,
-        "nombre":       paciente["riot_game_name"],
-        "tag":          paciente["riot_tag_line"],
-        "email":        paciente["email"],
+        "sincronizado":   True,
+        "nombre":         paciente["riot_game_name"],
+        "tag":            paciente["riot_tag_line"],
+        "nombre_real":    paciente["nombre_real"] or "",
+        "apellidos_real": paciente["apellidos_real"] or "",
+        "nombre_display": f"{paciente['nombre_real']} {paciente['apellidos_real']}".strip() if paciente["nombre_real"] else paciente["riot_game_name"],
+        "email":          paciente["email"],
         "hoy": {
             "horas":       horas_hoy,
             "partidas":    int(hoy["partidas_hoy"]),
