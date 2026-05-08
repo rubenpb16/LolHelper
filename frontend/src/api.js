@@ -119,8 +119,10 @@ export const proPacientes = {
   mes:            (id, year, month)               => api.get(`/pro/pacientes/${id}/mes?year=${year}&month=${month}`),
   dia:            (id, fecha)                     => api.get(`/pro/pacientes/${id}/dia?fecha=${fecha}`),
   notas:          (id)                            => api.get(`/pro/pacientes/${id}/notas`),
-  crearNota:      (id, contenido)                 => api.post(`/pro/pacientes/${id}/notas`, { contenido }),
-  editarNota:     (id, notaId, contenido)         => api.put(`/pro/pacientes/${id}/notas/${notaId}`, { contenido }),
+  resumenConsulta:(id, dias = 7)                  => api.get(`/pro/pacientes/${id}/resumen-consulta?dias=${dias}`),
+  comparativa:    (id, diasActual = 30, diasAnt = 30) => api.get(`/pro/pacientes/${id}/comparativa?dias_actual=${diasActual}&dias_anterior=${diasAnt}`),
+  crearNota:      (id, contenido, categoria = 'observacion') => api.post(`/pro/pacientes/${id}/notas`, { contenido, categoria }),
+  editarNota:     (id, notaId, contenido, categoria = 'observacion') => api.put(`/pro/pacientes/${id}/notas/${notaId}`, { contenido, categoria }),
   borrarNota:     (id, notaId)                    => api.delete(`/pro/pacientes/${id}/notas/${notaId}`),
   actualizarEstado: (id, estado)                  => api.patch(`/pro/pacientes/${id}/estado`, { estado }),
 }

@@ -1821,8 +1821,18 @@ class ProRegistroRequest(BaseModel):
             raise ValueError("Debes aceptar el tratamiento de datos")
         return v
 
+_CATEGORIAS_NOTA = ["observacion", "plan", "alerta", "logro"]
+
 class NotaRequest(BaseModel):
     contenido: str
+    categoria: str = "observacion"
+
+    @field_validator("categoria")
+    @classmethod
+    def categoria_valida(cls, v):
+        if v not in _CATEGORIAS_NOTA:
+            raise ValueError(f"Categoría debe ser una de: {_CATEGORIAS_NOTA}")
+        return v
 
 class EstadoRequest(BaseModel):
     estado: str
@@ -1940,18 +1950,19 @@ def invitacion_aceptar(token: str, data: AceptarInvitacionRequest, db = Depends(
 
     email = data.email.lower().strip()
 
-    # Guardar invitación pendiente (upsert por si repite el formulario)
+    # Upsert por (profesional_id, email_paciente) — evita duplicados si el paciente
+    # vuelve a rellenar el formulario, sin colisionar con otras invitaciones del mismo pro
+    inv_token = _secrets.token_urlsafe(16)
     cur.execute("""
         INSERT INTO invitaciones_pro
             (profesional_id, token, email_paciente, riot_game_name, riot_tag_line, estado)
         VALUES (%s, %s, %s, %s, %s, 'pendiente_registro')
-        ON CONFLICT (token) DO UPDATE SET
-            email_paciente  = EXCLUDED.email_paciente,
-            riot_game_name  = EXCLUDED.riot_game_name,
-            riot_tag_line   = EXCLUDED.riot_tag_line,
-            estado          = 'pendiente_registro'
+        ON CONFLICT (profesional_id, email_paciente) DO UPDATE SET
+            riot_game_name = EXCLUDED.riot_game_name,
+            riot_tag_line  = EXCLUDED.riot_tag_line,
+            estado         = 'pendiente_registro'
     """, (
-        pro["id"], token, email,
+        pro["id"], inv_token, email,
         data.riot_game_name.strip(),
         data.riot_tag_line.strip().lstrip("#"),
     ))
@@ -1981,6 +1992,39 @@ def invitacion_aceptar(token: str, data: AceptarInvitacionRequest, db = Depends(
 
 # ── Lista de pacientes ──────────────────────────────────────────
 
+def _calcular_alertas_paciente(r: dict) -> list:
+    """Genera la lista de alertas automáticas para un paciente en la lista del profesional."""
+    alertas = []
+    excesos   = int(r.get("excesos_7d") or 0)
+    madrugada = int(r.get("partidas_madrugada_7d") or 0)
+    pct_rend  = float(r.get("pct_rendicion_7d") or 0)
+    dias_sin  = int(r.get("dias_sin_jugar") or 0)
+
+    if excesos >= 3:
+        alertas.append({"tipo": "exceso", "nivel": "danger",
+            "texto": f"Superó el límite {excesos} días esta semana"})
+    elif excesos >= 1:
+        alertas.append({"tipo": "exceso", "nivel": "warning",
+            "texto": f"Superó el límite {excesos} día{'s' if excesos > 1 else ''} esta semana"})
+
+    if madrugada >= 3:
+        alertas.append({"tipo": "madrugada", "nivel": "warning",
+            "texto": f"Jugó de madrugada (+23h) {madrugada} veces esta semana"})
+
+    if pct_rend >= 40:
+        alertas.append({"tipo": "rendicion", "nivel": "danger",
+            "texto": f"Tasa de rendición del {pct_rend:.0f}% en los últimos 7 días"})
+    elif pct_rend >= 25:
+        alertas.append({"tipo": "rendicion", "nivel": "warning",
+            "texto": f"Tasa de rendición del {pct_rend:.0f}% en los últimos 7 días"})
+
+    if dias_sin >= 14:
+        alertas.append({"tipo": "inactividad", "nivel": "info",
+            "texto": f"Sin actividad hace {dias_sin} días"})
+
+    return alertas
+
+
 @app.get("/pro/pacientes", summary="Lista de pacientes del profesional")
 def pro_pacientes(ctx = Depends(get_profesional_actual), db = Depends(get_db)):
     cur = db.cursor()
@@ -2004,14 +2048,37 @@ def pro_pacientes(ctx = Depends(get_profesional_actual), db = Depends(get_db)):
              FROM partidas p
              WHERE p.puuid = u.puuid
                AND p.fecha >= CURRENT_DATE - INTERVAL '7 days') AS horas_semana,
-            -- Wellbeing score (último progreso diario disponible)
+            -- pct limite ultimo dia con actividad
             (SELECT pd.porcentaje_consumido_dia
              FROM progreso_diario pd
              WHERE pd.usuario_id = u.id
-             ORDER BY pd.fecha DESC LIMIT 1) AS ultimo_pct_limite
+             ORDER BY pd.fecha DESC LIMIT 1) AS ultimo_pct_limite,
+            -- Alertas automáticas: excesos recientes
+            (SELECT COUNT(*) FROM progreso_diario pd
+             WHERE pd.usuario_id = u.id
+               AND pd.fecha >= CURRENT_DATE - INTERVAL '7 days'
+               AND pd.objetivo_dia_cumplido = FALSE) AS excesos_7d,
+            -- Partidas de madrugada últimos 7 días (después de las 23h)
+            (SELECT COUNT(*) FROM partidas p
+             WHERE p.puuid = u.puuid
+               AND p.fecha >= CURRENT_DATE - INTERVAL '7 days'
+               AND EXTRACT(HOUR FROM p.hora_inicio) >= 23) AS partidas_madrugada_7d,
+            -- Tasa de rendición negativa últimos 7 días
+            (SELECT ROUND(
+                SUM(CASE WHEN rendicion AND resultado='Derrota' THEN 1 ELSE 0 END)::numeric
+                / NULLIF(COUNT(*),0) * 100, 0)
+             FROM partidas p
+             WHERE p.puuid = u.puuid
+               AND p.fecha >= CURRENT_DATE - INTERVAL '7 days') AS pct_rendicion_7d,
+            -- Días sin jugar (para detectar abandono de la app)
+            (CURRENT_DATE - MAX(p2.fecha)) AS dias_sin_jugar
         FROM relaciones_pro_paciente r
         JOIN usuarios_app u ON u.id = r.paciente_id
+        LEFT JOIN partidas p2 ON p2.puuid = u.puuid
         WHERE r.profesional_id = %s
+        GROUP BY u.id, u.riot_game_name, u.riot_tag_line, u.email,
+                 u.ultima_sincronizacion, u.puuid,
+                 r.id, r.estado_tratamiento, r.fecha_inicio, r.fecha_alta, r.activo
         ORDER BY r.estado_tratamiento, u.riot_game_name
     """, (ctx["profesional"]["id"],))
 
@@ -2032,6 +2099,7 @@ def pro_pacientes(ctx = Depends(get_profesional_actual), db = Depends(get_db)):
             "horas_semana":       float(r["horas_semana"] or 0),
             "sincronizado":       r["puuid"] is not None,
             "ultimo_pct_limite":  float(r["ultimo_pct_limite"] or 0),
+            "alertas":            _calcular_alertas_paciente(r),
         })
     return {"pacientes": pacientes}
 
@@ -2048,6 +2116,214 @@ def _verificar_acceso_paciente(profesional_id: int, paciente_id: int, cur):
     if not rel:
         raise HTTPException(403, detail="No tienes acceso a este paciente")
     return dict(rel)
+
+
+@app.get("/pro/pacientes/{paciente_id}/resumen-consulta", summary="Resumen pre-consulta del paciente (últimos 7 días)")
+def pro_resumen_consulta(
+    paciente_id: int,
+    dias: int = 7,
+    ctx = Depends(get_profesional_actual),
+    db  = Depends(get_db),
+):
+    cur = db.cursor()
+    _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+    cur.execute("SELECT * FROM usuarios_app WHERE id = %s AND activo = TRUE", (paciente_id,))
+    paciente = cur.fetchone()
+    if not paciente or not paciente["puuid"]:
+        return {"sincronizado": False}
+
+    puuid = paciente["puuid"]
+    uid   = paciente["id"]
+
+    # ── Estadísticas del período actual ──────────────────────────
+    cur.execute("""
+        SELECT
+            COUNT(*)                                                             AS partidas,
+            COALESCE(ROUND(SUM(duracion_min)::numeric/60, 2), 0)                AS horas_total,
+            COALESCE(ROUND(AVG(kda)::numeric, 2), 0)                            AS kda_avg,
+            SUM(CASE WHEN resultado='Victoria'                  THEN 1 ELSE 0 END) AS victorias,
+            SUM(CASE WHEN rendicion AND resultado='Derrota'     THEN 1 ELSE 0 END) AS rendiciones_neg,
+            SUM(CASE WHEN NOT apto_para_progresion             THEN 1 ELSE 0 END) AS afks,
+            SUM(CASE WHEN EXTRACT(HOUR FROM hora_inicio) >= 23 THEN 1 ELSE 0 END) AS partidas_madrugada,
+            COUNT(DISTINCT fecha)                                                AS dias_jugados,
+            ROUND(AVG(duracion_min)::numeric, 1)                                AS duracion_media
+        FROM partidas
+        WHERE puuid = %s AND fecha >= CURRENT_DATE - (%s * INTERVAL '1 day')
+    """, (puuid, dias))
+    stats_row = dict(cur.fetchone())
+
+    # ── Días que superaron el límite ──────────────────────────────
+    cur.execute("""
+        SELECT COUNT(*) AS excesos
+        FROM progreso_diario
+        WHERE usuario_id = %s
+          AND fecha >= CURRENT_DATE - (%s * INTERVAL '1 day')
+          AND objetivo_dia_cumplido = FALSE
+    """, (uid, dias))
+    excesos = int(cur.fetchone()["excesos"] or 0)
+
+    # ── Peor día del período ──────────────────────────────────────
+    cur.execute("""
+        SELECT fecha, ROUND(SUM(duracion_min)::numeric/60, 2) AS horas
+        FROM partidas
+        WHERE puuid = %s AND fecha >= CURRENT_DATE - (%s * INTERVAL '1 day')
+        GROUP BY fecha ORDER BY horas DESC LIMIT 1
+    """, (puuid, dias))
+    peor_dia = dict(cur.fetchone()) if cur.rowcount else None
+
+    # ── Racha actual ──────────────────────────────────────────────
+    cur.execute("""
+        SELECT racha_dias_cumplidos FROM progreso_diario
+        WHERE usuario_id = %s ORDER BY fecha DESC LIMIT 1
+    """, (uid,))
+    racha_row = cur.fetchone()
+    racha = int(racha_row["racha_dias_cumplidos"] if racha_row else 0)
+
+    # ── Señales críticas automáticas ─────────────────────────────
+    total     = int(stats_row["partidas"] or 0)
+    horas     = float(stats_row["horas_total"] or 0)
+    victorias = int(stats_row["victorias"] or 0)
+    rend_neg  = int(stats_row["rendiciones_neg"] or 0)
+    afks      = int(stats_row["afks"] or 0)
+    madrugada = int(stats_row["partidas_madrugada"] or 0)
+    pct_rend  = round(rend_neg / total * 100, 1) if total > 0 else 0
+    pct_vic   = round(victorias / total * 100, 1) if total > 0 else 0
+
+    señales_criticas  = []
+    señales_positivas = []
+
+    if excesos >= 3:
+        señales_criticas.append(f"Superó el límite en {excesos} de los últimos {dias} días")
+    elif excesos >= 1:
+        señales_criticas.append(f"Superó el límite {excesos} día{'s' if excesos > 1 else ''}")
+
+    if pct_rend >= 30:
+        señales_criticas.append(f"Alta tasa de rendición: {pct_rend:.0f}% de las partidas")
+
+    if madrugada >= 3:
+        señales_criticas.append(f"Jugó de madrugada en {madrugada} ocasiones esta semana")
+
+    if afks >= 2:
+        señales_criticas.append(f"{afks} partidas con AFK detectado")
+
+    if pct_vic >= 55 and total >= 5:
+        señales_positivas.append(f"Buen winrate: {pct_vic:.0f}% ({victorias}V/{total - victorias}D)")
+
+    if racha >= 3:
+        señales_positivas.append(f"Racha activa de {racha} días cumpliendo el objetivo")
+
+    if excesos == 0 and total > 0:
+        señales_positivas.append(f"Respetó el límite todos los días del período")
+
+    # ── Tendencia vs período anterior ────────────────────────────
+    cur.execute("""
+        SELECT COALESCE(ROUND(SUM(duracion_min)::numeric/60, 2), 0) AS horas_ant
+        FROM partidas
+        WHERE puuid = %s
+          AND fecha >= CURRENT_DATE - (%s * INTERVAL '1 day') * 2
+          AND fecha <  CURRENT_DATE - (%s * INTERVAL '1 day')
+    """, (puuid, dias, dias))
+    horas_ant = float(cur.fetchone()["horas_ant"] or 0)
+
+    if horas_ant == 0:
+        tendencia = "sin_datos_anteriores"
+    elif horas < horas_ant * 0.85:
+        tendencia = "mejorando"
+    elif horas > horas_ant * 1.15:
+        tendencia = "empeorando"
+    else:
+        tendencia = "estable"
+
+    return {
+        "sincronizado":      True,
+        "periodo_dias":      dias,
+        "stats": {
+            "partidas":         total,
+            "horas_total":      horas,
+            "kda_avg":          float(stats_row["kda_avg"] or 0),
+            "winrate_pct":      pct_vic,
+            "dias_jugados":     int(stats_row["dias_jugados"] or 0),
+            "excesos_limite":   excesos,
+            "rendicion_pct":    pct_rend,
+            "afks":             afks,
+            "madrugada":        madrugada,
+            "duracion_media_min": float(stats_row["duracion_media"] or 0),
+            "racha_actual":     racha,
+        },
+        "peor_dia":           {"fecha": str(peor_dia["fecha"]), "horas": float(peor_dia["horas"])} if peor_dia else None,
+        "señales_criticas":   señales_criticas,
+        "señales_positivas":  señales_positivas,
+        "tendencia":          tendencia,
+        "horas_periodo_anterior": horas_ant,
+    }
+
+
+@app.get("/pro/pacientes/{paciente_id}/comparativa", summary="Comparativa de dos períodos del paciente")
+def pro_comparativa(
+    paciente_id:    int,
+    dias_actual:    int = 30,
+    dias_anterior:  int = 30,
+    ctx = Depends(get_profesional_actual),
+    db  = Depends(get_db),
+):
+    cur = db.cursor()
+    _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+    cur.execute("SELECT puuid FROM usuarios_app WHERE id = %s AND activo = TRUE", (paciente_id,))
+    row = cur.fetchone()
+    if not row or not row["puuid"]:
+        return {"sincronizado": False}
+    puuid = row["puuid"]
+
+    def _periodo_stats(desde_dias, hasta_dias):
+        cur.execute("""
+            SELECT
+                COUNT(*)                                                              AS partidas,
+                COALESCE(ROUND(SUM(duracion_min)::numeric/60, 2), 0)                 AS horas,
+                COALESCE(ROUND(AVG(duracion_min)::numeric/60/NULLIF(COUNT(DISTINCT fecha),0), 2), 0) AS horas_dia_media,
+                SUM(CASE WHEN resultado='Victoria'              THEN 1 ELSE 0 END)   AS victorias,
+                SUM(CASE WHEN rendicion AND resultado='Derrota' THEN 1 ELSE 0 END)   AS rendiciones,
+                SUM(CASE WHEN NOT apto_para_progresion          THEN 1 ELSE 0 END)   AS afks,
+                SUM(CASE WHEN EXTRACT(HOUR FROM hora_inicio)>=23 THEN 1 ELSE 0 END)  AS madrugada,
+                COUNT(DISTINCT fecha)                                                 AS dias_jugados,
+                (CURRENT_DATE - INTERVAL '1 day' * %s)::text                         AS fecha_desde,
+                (CURRENT_DATE - INTERVAL '1 day' * %s)::text                         AS fecha_hasta
+            FROM partidas
+            WHERE puuid = %s
+              AND fecha >= CURRENT_DATE - (%s * INTERVAL '1 day')
+              AND fecha <  CURRENT_DATE - (%s * INTERVAL '1 day')
+        """, (hasta_dias, desde_dias, puuid, hasta_dias, desde_dias))
+        r = dict(cur.fetchone())
+        total = int(r["partidas"] or 0)
+        return {
+            "desde":          r["fecha_desde"],
+            "hasta":          r["fecha_hasta"],
+            "partidas":       total,
+            "horas":          float(r["horas"] or 0),
+            "horas_dia":      float(r["horas_dia_media"] or 0),
+            "winrate_pct":    round(int(r["victorias"] or 0) / total * 100, 1) if total else 0,
+            "rendicion_pct":  round(int(r["rendiciones"] or 0) / total * 100, 1) if total else 0,
+            "afks":           int(r["afks"] or 0),
+            "madrugada":      int(r["madrugada"] or 0),
+            "dias_jugados":   int(r["dias_jugados"] or 0),
+        }
+
+    actual   = _periodo_stats(0, dias_actual)
+    anterior = _periodo_stats(dias_actual, dias_actual + dias_anterior)
+
+    def _cambio(nuevo, viejo):
+        if viejo == 0: return None
+        return round(nuevo - viejo, 2)
+
+    return {
+        "actual":   actual,
+        "anterior": anterior,
+        "cambio": {
+            "horas_dia":     _cambio(actual["horas_dia"], anterior["horas_dia"]),
+            "winrate_pct":   _cambio(actual["winrate_pct"], anterior["winrate_pct"]),
+            "rendicion_pct": _cambio(actual["rendicion_pct"], anterior["rendicion_pct"]),
+            "madrugada":     _cambio(actual["madrugada"], anterior["madrugada"]),
+        },
+    }
 
 
 @app.get("/pro/pacientes/{paciente_id}/mes", summary="Calendario mensual del paciente")
@@ -2156,16 +2432,13 @@ def pro_paciente_dashboard(
     db  = Depends(get_db),
 ):
     cur = db.cursor()
-    _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+    rel = _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
 
-    # Reutilizamos la misma query del dashboard normal, pero para este paciente
     cur.execute("SELECT * FROM usuarios_app WHERE id = %s AND activo = TRUE", (paciente_id,))
     paciente = cur.fetchone()
     if not paciente:
         raise HTTPException(404, detail="Paciente no encontrado")
 
-    # Delegamos al endpoint de dashboard pasando el usuario del paciente
-    # (inyectamos el usuario manualmente en lugar de usar la cookie)
     from datetime import date, timedelta
     puuid = paciente["puuid"]
     uid   = paciente["id"]
@@ -2250,8 +2523,9 @@ def pro_paciente_dashboard(
             "limite_semana":  limite_s,
             "porcentaje_dia": pct_dia,
         },
-        "racha":            racha,
-        "ranked":           ranked,
+        "racha":              racha,
+        "ranked":             ranked,
+        "estado_tratamiento": rel["estado_tratamiento"],
         "ultimas_partidas": [
             {
                 "campeon":          r["campeon"],
@@ -2278,16 +2552,17 @@ def pro_actualizar_estado(
 ):
     cur = db.cursor()
     _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
-    fecha_alta = "NOW()" if body.estado == "alta" else "NULL"
-    cur.execute(f"""
+    es_alta = body.estado == "alta"
+    cur.execute("""
         UPDATE relaciones_pro_paciente
         SET estado_tratamiento = %s,
-            fecha_alta = {fecha_alta},
+            fecha_alta = CASE WHEN %s THEN NOW() ELSE NULL END,
             activo = %s
         WHERE profesional_id = %s AND paciente_id = %s
     """, (
         body.estado,
-        body.estado != "alta",
+        es_alta,
+        not es_alta,
         ctx["profesional"]["id"],
         paciente_id,
     ))
@@ -2306,7 +2581,7 @@ def pro_notas_list(
     cur = db.cursor()
     rel = _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
     cur.execute("""
-        SELECT id, contenido, creada_en, editada_en
+        SELECT id, contenido, categoria, creada_en, editada_en
         FROM notas_profesional
         WHERE relacion_id = %s
         ORDER BY creada_en DESC
@@ -2316,6 +2591,7 @@ def pro_notas_list(
             {
                 "id":        r["id"],
                 "contenido": r["contenido"],
+                "categoria": r["categoria"] or "observacion",
                 "creada_en": r["creada_en"].isoformat() if r["creada_en"] else None,
                 "editada_en":r["editada_en"].isoformat() if r["editada_en"] else None,
             }
@@ -2334,8 +2610,8 @@ def pro_notas_crear(
     cur = db.cursor()
     rel = _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
     cur.execute(
-        "INSERT INTO notas_profesional (relacion_id, contenido) VALUES (%s, %s) RETURNING id, creada_en",
-        (rel["id"], body.contenido.strip())
+        "INSERT INTO notas_profesional (relacion_id, contenido, categoria) VALUES (%s, %s, %s) RETURNING id, creada_en",
+        (rel["id"], body.contenido.strip(), body.categoria)
     )
     row = cur.fetchone()
     db.commit()
@@ -2353,9 +2629,9 @@ def pro_notas_editar(
     cur = db.cursor()
     rel = _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
     cur.execute("""
-        UPDATE notas_profesional SET contenido = %s, editada_en = NOW()
+        UPDATE notas_profesional SET contenido = %s, categoria = %s, editada_en = NOW()
         WHERE id = %s AND relacion_id = %s
-    """, (body.contenido.strip(), nota_id, rel["id"]))
+    """, (body.contenido.strip(), body.categoria, nota_id, rel["id"]))
     if cur.rowcount == 0:
         raise HTTPException(404, detail="Nota no encontrada")
     db.commit()

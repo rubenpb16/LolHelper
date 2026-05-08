@@ -125,7 +125,7 @@ export default function ProDashboard() {
             <table style={s.table}>
               <thead>
                 <tr>
-                  {['Paciente', 'Estado', 'Horas / semana', 'Última partida', 'Sincronizado', ''].map(h => (
+                  {['Paciente', 'Alertas', 'Estado', 'Horas / semana', 'Última partida', ''].map(h => (
                     <th key={h} style={s.th}>{h}</th>
                   ))}
                 </tr>
@@ -136,8 +136,27 @@ export default function ProDashboard() {
                     onClick={() => navigate(`/pro/pacientes/${p.id}`)}
                   >
                     <td style={s.td}>
-                      <div style={{ fontWeight: 600, color: '#1e293b' }}>{p.riot_game_name}<span style={{ color: '#94a3b8', fontWeight: 400 }}>#{p.riot_tag_line}</span></div>
+                      <div style={{ fontWeight: 600, color: '#1e293b' }}>
+                        {p.riot_game_name}<span style={{ color: '#94a3b8', fontWeight: 400 }}>#{p.riot_tag_line}</span>
+                      </div>
                       <div style={{ fontSize: 12, color: '#94a3b8' }}>{p.email}</div>
+                    </td>
+                    <td style={s.td}>
+                      {(p.alertas || []).length === 0
+                        ? <span style={{ fontSize: 12, color: '#94a3b8' }}>—</span>
+                        : (p.alertas || []).map((a, i) => (
+                          <span key={i} title={a.texto} style={{
+                            display: 'inline-block', marginRight: 4, marginBottom: 2,
+                            padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 600,
+                            background: a.nivel === 'danger' ? '#fee2e2' : a.nivel === 'warning' ? '#fef9c3' : '#eff6ff',
+                            color:      a.nivel === 'danger' ? '#dc2626' : a.nivel === 'warning' ? '#b45309' : '#2563eb',
+                          }}>
+                            {a.tipo === 'exceso'     ? '🔴 Límite' :
+                             a.tipo === 'madrugada'  ? '🌙 Madrugada' :
+                             a.tipo === 'rendicion'  ? '🏳 Rendición' :
+                             a.tipo === 'inactividad'? 'ℹ️ Inactivo' : a.tipo}
+                          </span>
+                        ))}
                     </td>
                     <td style={s.td}>{badge(p.estado_tratamiento)}</td>
                     <td style={s.td}>
@@ -149,11 +168,6 @@ export default function ProDashboard() {
                       {p.ultima_partida
                         ? new Date(p.ultima_partida + 'T00:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' })
                         : <span style={{ color: '#94a3b8' }}>Sin datos</span>}
-                    </td>
-                    <td style={s.td}>
-                      <span style={{ color: p.sincronizado ? '#059669' : '#f59e0b', fontSize: 12, fontWeight: 600 }}>
-                        {p.sincronizado ? '● Activo' : '○ Pendiente'}
-                      </span>
                     </td>
                     <td style={s.td}>
                       <button style={s.verBtn} onClick={e => { e.stopPropagation(); navigate(`/pro/pacientes/${p.id}`) }}>
@@ -197,6 +211,6 @@ const s = {
   th:         { padding: '12px 16px', fontSize: 11, color: '#94a3b8', textAlign: 'left', textTransform: 'uppercase', letterSpacing: .7, borderBottom: '1px solid #e2e8f0', fontWeight: 600 },
   tr:         { cursor: 'pointer', transition: 'background .12s' },
   td:         { padding: '14px 16px', fontSize: 14, borderBottom: '1px solid #f1f5f9', color: '#334155' },
-  verBtn:     { padding: '6px 14px', borderRadius: 7, background: '#eff6ff', border: 'none', color: '#2563eb', fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: "'DM Sans', sans-serif' "},
+  verBtn:     { padding: '6px 14px', borderRadius: 7, background: '#eff6ff', border: 'none', color: '#2563eb', fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: "'DM Sans', sans-serif" },
   center:     { display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 300, color: '#64748b' },
 }

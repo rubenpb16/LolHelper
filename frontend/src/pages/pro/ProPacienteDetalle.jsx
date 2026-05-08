@@ -22,6 +22,13 @@ function scoreLabel(s) {
   return 'Crítico'
 }
 
+const CAT_MAP = {
+  observacion: { l: '📋 Observación',       c: '#2563eb', bg: '#eff6ff' },
+  plan:        { l: '🎯 Plan terapéutico',  c: '#7c3aed', bg: '#f5f3ff' },
+  alerta:      { l: '⚠️ Alerta',            c: '#dc2626', bg: '#fee2e2' },
+  logro:       { l: '🏆 Logro',             c: '#059669', bg: '#dcfce7' },
+}
+
 const ESTADOS = {
   evaluacion:         { label: 'Evaluación inicial',  color: '#f59e0b' },
   tratamiento_activo: { label: 'Tratamiento activo',  color: '#2563eb' },
@@ -130,8 +137,10 @@ export default function ProPacienteDetalle() {
   const navigate       = useNavigate()
   const proUser        = JSON.parse(localStorage.getItem('pro_user') || '{}')
 
-  const [tab,            setTab]            = useState('resumen')
+  const [tab,            setTab]            = useState('preconsulta')
   const [dashData,       setDashData]       = useState(null)
+  const [preConsulta,    setPreConsulta]    = useState(null)
+  const [comparativa,    setComparativa]    = useState(null)
   const [notas,          setNotas]          = useState([])
   const [analisisData,   setAnalisisData]   = useState(null)
   const [historialData,  setHistorialData]  = useState(null)
@@ -142,6 +151,7 @@ export default function ProPacienteDetalle() {
   const [error,          setError]          = useState('')
   const [cambiandoEstado,setCambiandoEstado]= useState(false)
   const [nuevaNota,      setNuevaNota]      = useState('')
+  const [nuevaCategoria, setNuevaCategoria] = useState('observacion')
   const [savingNota,     setSavingNota]     = useState(false)
   const [estadoActual,   setEstadoActual]   = useState('evaluacion')
 
@@ -160,15 +170,19 @@ export default function ProPacienteDetalle() {
   const H_LIMIT = 50
   const today = new Date().toISOString().slice(0, 10)
 
-  // Carga inicial (resumen + notas)
+  // Carga inicial (resumen + notas + pre-consulta)
   useEffect(() => {
     Promise.all([
       proPacientes.dashboard(pacienteId),
       proPacientes.notas(pacienteId),
-    ]).then(([d, n]) => {
+      proPacientes.resumenConsulta(pacienteId, 7),
+      proPacientes.comparativa(pacienteId, 30, 30),
+    ]).then(([d, n, pc, comp]) => {
+      setPreConsulta(pc.data)
+      setComparativa(comp.data)
       setDashData(d.data)
       setNotas(n.data.notas)
-      setEstadoActual(d.data._estado || 'evaluacion')
+      setEstadoActual(d.data.estado_tratamiento || 'evaluacion')
     }).catch(() => setError('No se pudieron cargar los datos del paciente'))
       .finally(() => setLoading(false))
   }, [pacienteId])
@@ -229,8 +243,8 @@ export default function ProPacienteDetalle() {
     if (!nuevaNota.trim()) return
     setSavingNota(true)
     try {
-      const r = await proPacientes.crearNota(pacienteId, nuevaNota.trim())
-      setNotas(prev => [{ id: r.data.id, contenido: nuevaNota.trim(), creada_en: r.data.creada_en, editada_en: null }, ...prev])
+      const r = await proPacientes.crearNota(pacienteId, nuevaNota.trim(), nuevaCategoria)
+      setNotas(prev => [{ id: r.data.id, contenido: nuevaNota.trim(), categoria: nuevaCategoria, creada_en: r.data.creada_en, editada_en: null }, ...prev])
       setNuevaNota('')
     } catch { /* silencioso */ }
     setSavingNota(false)
@@ -281,10 +295,128 @@ export default function ProPacienteDetalle() {
 
         {/* ── Tabs ── */}
         <div style={s.tabs}>
-          {[['resumen','Resumen'],['analisis','Análisis'],['historial','Historial'],['notas',`Notas (${notas.length})`]].map(([k, l]) => (
+          {[
+            ['preconsulta', '🩺 Pre-consulta'],
+            ['resumen',     'Resumen'],
+            ['analisis',    'Análisis'],
+            ['historial',   'Historial'],
+            ['notas',       `Notas (${notas.length})`],
+          ].map(([k, l]) => (
             <button key={k} style={{ ...s.tab, ...(tab === k ? s.tabActive : {}) }} onClick={() => setTab(k)}>{l}</button>
           ))}
         </div>
+
+        {/* ════════════ TAB: PRE-CONSULTA ════════════ */}
+        {tab === 'preconsulta' && (() => {
+          const PC_TENDENCIA = {
+            mejorando:             { label: '↓ Mejorando',        color: '#059669', bg: '#dcfce7' },
+            empeorando:            { label: '↑ Empeorando',       color: '#dc2626', bg: '#fee2e2' },
+            estable:               { label: '→ Estable',           color: '#d97706', bg: '#fef9c3' },
+            sin_datos_anteriores:  { label: 'Sin datos previos',  color: '#94a3b8', bg: '#f1f5f9' },
+          }
+          const pc   = preConsulta
+          const comp = comparativa
+          if (!pc || !pc.sincronizado) return (
+            <div style={s.emptyCard}>Sin datos suficientes para el resumen de consulta.</div>
+          )
+          const tendencia = PC_TENDENCIA[pc.tendencia] || PC_TENDENCIA.estable
+          const fmt7 = (h) => { const hh = Math.floor(h), m = Math.round((h-hh)*60); return hh ? `${hh}h${m?` ${m}min`:''}` : `${m}min` }
+          const cambio = comp?.cambio || {}
+
+          return (
+            <>
+              {/* Cabecera resumen */}
+              <div style={{ ...s.card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                <div>
+                  <p style={{ ...s.cardTitle, marginBottom: 4 }}>Resumen últimos {pc.periodo_dias} días</p>
+                  <p style={{ fontSize: 13, color: '#64748b' }}>
+                    {pc.stats.partidas} partidas · {fmt7(pc.stats.horas_total)} · {pc.stats.dias_jugados} días jugados
+                  </p>
+                </div>
+                <div style={{ background: tendencia.bg, color: tendencia.color, fontWeight: 700, fontSize: 14, padding: '8px 16px', borderRadius: 8 }}>
+                  {tendencia.label}
+                </div>
+              </div>
+
+              {/* KPIs */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 14 }}>
+                {[
+                  { val: `${pc.stats.winrate_pct.toFixed(0)}%`,    lbl: 'Winrate',              color: pc.stats.winrate_pct >= 50 ? '#059669' : '#dc2626' },
+                  { val: pc.stats.excesos_limite,                   lbl: 'Días excedió límite',  color: pc.stats.excesos_limite > 0 ? '#dc2626' : '#059669' },
+                  { val: `${pc.stats.rendicion_pct.toFixed(0)}%`,   lbl: 'Rendición propia',     color: pc.stats.rendicion_pct > 20 ? '#dc2626' : '#059669' },
+                  { val: pc.stats.madrugada,                        lbl: 'Partidas de madrugada',color: pc.stats.madrugada > 2 ? '#d97706' : '#059669' },
+                ].map((st, i) => (
+                  <div key={i} style={{ ...s.statCard, textAlign: 'center' }}>
+                    <div style={{ fontSize: 24, fontWeight: 700, color: st.color, fontFamily: "'Syne', sans-serif" }}>{st.val}</div>
+                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>{st.lbl}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Señales */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
+                <div style={s.card}>
+                  <p style={{ ...s.cardTitle, color: '#dc2626', marginBottom: 10 }}>⚠️ Señales críticas</p>
+                  {pc.señales_criticas.length === 0
+                    ? <p style={{ color: '#94a3b8', fontSize: 13 }}>Sin señales críticas este período.</p>
+                    : pc.señales_criticas.map((msg, i) => (
+                      <div key={i} style={{ display: 'flex', gap: 8, padding: '8px 0', borderBottom: '1px solid #fef2f2', fontSize: 13, color: '#1e293b' }}>
+                        <span style={{ color: '#dc2626', flexShrink: 0 }}>●</span> {msg}
+                      </div>
+                    ))}
+                </div>
+                <div style={s.card}>
+                  <p style={{ ...s.cardTitle, color: '#059669', marginBottom: 10 }}>✅ Avances positivos</p>
+                  {pc.señales_positivas.length === 0
+                    ? <p style={{ color: '#94a3b8', fontSize: 13 }}>Sin avances destacables este período.</p>
+                    : pc.señales_positivas.map((msg, i) => (
+                      <div key={i} style={{ display: 'flex', gap: 8, padding: '8px 0', borderBottom: '1px solid #f0fdf4', fontSize: 13, color: '#1e293b' }}>
+                        <span style={{ color: '#059669', flexShrink: 0 }}>●</span> {msg}
+                      </div>
+                    ))}
+                </div>
+              </div>
+
+              {/* Comparativa 30d vs 30d anteriores */}
+              {comp && comp.actual && comp.anterior && (
+                <div style={s.card}>
+                  <p style={s.cardTitle}>Comparativa de períodos (últimos 30 días vs 30 días anteriores)</p>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12 }}>
+                    {[
+                      { lbl: 'Horas/día',      actual: comp.actual.horas_dia.toFixed(1),      prev: comp.anterior.horas_dia.toFixed(1),      cambio: cambio.horas_dia,     inv: true  },
+                      { lbl: 'Winrate %',      actual: comp.actual.winrate_pct.toFixed(0)+'%', prev: comp.anterior.winrate_pct.toFixed(0)+'%', cambio: cambio.winrate_pct,   inv: false },
+                      { lbl: 'Rendición %',    actual: comp.actual.rendicion_pct.toFixed(0)+'%',prev: comp.anterior.rendicion_pct.toFixed(0)+'%',cambio: cambio.rendicion_pct, inv: true  },
+                      { lbl: 'Madrugada',      actual: comp.actual.madrugada,                  prev: comp.anterior.madrugada,                   cambio: cambio.madrugada,     inv: true  },
+                    ].map((item, i) => {
+                      const mejora = item.cambio !== null && (item.inv ? item.cambio < 0 : item.cambio > 0)
+                      const empeora= item.cambio !== null && (item.inv ? item.cambio > 0 : item.cambio < 0)
+                      return (
+                        <div key={i} style={{ background: '#f8fafc', borderRadius: 10, padding: '14px', border: '1px solid #e2e8f0' }}>
+                          <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8, fontWeight: 600, textTransform: 'uppercase' }}>{item.lbl}</div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div>
+                              <div style={{ fontSize: 18, fontWeight: 700, color: '#1e293b' }}>{item.actual}</div>
+                              <div style={{ fontSize: 11, color: '#94a3b8' }}>antes: {item.prev}</div>
+                            </div>
+                            {item.cambio !== null && (
+                              <div style={{
+                                fontSize: 13, fontWeight: 700, padding: '3px 8px', borderRadius: 6,
+                                background: mejora ? '#dcfce7' : empeora ? '#fee2e2' : '#f1f5f9',
+                                color: mejora ? '#059669' : empeora ? '#dc2626' : '#64748b',
+                              }}>
+                                {item.cambio > 0 ? '+' : ''}{typeof item.cambio === 'number' ? item.cambio.toFixed(1) : item.cambio}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+            </>
+          )
+        })()}
 
         {/* ════════════ TAB: RESUMEN ════════════ */}
         {tab === 'resumen' && (
@@ -709,6 +841,27 @@ export default function ProPacienteDetalle() {
               <p style={s.cardTitle}>Nueva nota</p>
               <p style={{ fontSize: 13, color: '#94a3b8', marginBottom: 12 }}>Estas notas son privadas — el paciente no puede verlas.</p>
               <form onSubmit={agregarNota}>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                  {[
+                    { v: 'observacion', l: '📋 Observación',      c: '#2563eb', bg: '#eff6ff' },
+                    { v: 'plan',        l: '🎯 Plan terapéutico', c: '#7c3aed', bg: '#f5f3ff' },
+                    { v: 'alerta',      l: '⚠️ Alerta',           c: '#dc2626', bg: '#fee2e2' },
+                    { v: 'logro',       l: '🏆 Logro',            c: '#059669', bg: '#dcfce7' },
+                  ].map(cat => (
+                    <button key={cat.v} type="button"
+                      style={{
+                        padding: '5px 12px', borderRadius: 20, border: '1px solid',
+                        fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                        fontFamily: "'DM Sans', sans-serif",
+                        background: nuevaCategoria === cat.v ? cat.bg : '#fff',
+                        borderColor: nuevaCategoria === cat.v ? cat.c : '#e2e8f0',
+                        color:       nuevaCategoria === cat.v ? cat.c : '#94a3b8',
+                      }}
+                      onClick={() => setNuevaCategoria(cat.v)}>
+                      {cat.l}
+                    </button>
+                  ))}
+                </div>
                 <textarea style={s.textarea} rows={4}
                   placeholder="Observación de sesión, plan terapéutico, evolución..."
                   value={nuevaNota} onChange={e => setNuevaNota(e.target.value)} />
@@ -719,18 +872,24 @@ export default function ProPacienteDetalle() {
             </div>
             {notas.length === 0
               ? <div style={{ ...s.card, textAlign: 'center', color: '#94a3b8', padding: 40 }}>Sin notas todavía.</div>
-              : notas.map(n => (
-                <div key={n.id} style={s.notaCard}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                    <span style={{ fontSize: 12, color: '#94a3b8' }}>
-                      {n.editada_en ? '(editada) ' : ''}
-                      {new Date(n.creada_en).toLocaleString('es-ES', { day:'numeric', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' })}
-                    </span>
-                    <button style={s.deletBtn} onClick={() => borrarNota(n.id)}>Borrar</button>
+              : notas.map(n => {
+                const cat = CAT_MAP[n.categoria] || CAT_MAP.observacion
+                return (
+                  <div key={n.id} style={{ ...s.notaCard, borderLeft: `3px solid ${cat.c}` }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: cat.bg, color: cat.c }}>{cat.l}</span>
+                        <span style={{ fontSize: 12, color: '#94a3b8' }}>
+                          {n.editada_en ? '(editada) ' : ''}
+                          {new Date(n.creada_en).toLocaleString('es-ES', { day:'numeric', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' })}
+                        </span>
+                      </div>
+                      <button style={s.deletBtn} onClick={() => borrarNota(n.id)}>Borrar</button>
+                    </div>
+                    <p style={{ fontSize: 14, color: '#334155', lineHeight: 1.7, whiteSpace: 'pre-wrap', margin: 0 }}>{n.contenido}</p>
                   </div>
-                  <p style={{ fontSize: 14, color: '#334155', lineHeight: 1.7, whiteSpace: 'pre-wrap', margin: 0 }}>{n.contenido}</p>
-                </div>
-              ))}
+                )
+              })}
           </>
         )}
       </div>
