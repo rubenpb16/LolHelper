@@ -69,6 +69,22 @@ export const stats = {
   rankHistoria: (dias = 60) => api.get(`/stats/rank-historia?dias=${dias}`),
 }
 
+export const tft = {
+  dashboard: () => api.get('/tft/dashboard'),
+  historial: ({ dias = 30, limit = 50, offset = 0, fecha_inicio, fecha_fin } = {}) => {
+    const qs = new URLSearchParams({ limit, offset })
+    if (fecha_inicio && fecha_fin) { qs.set('fecha_inicio', fecha_inicio); qs.set('fecha_fin', fecha_fin) }
+    else qs.set('dias', dias)
+    return api.get(`/tft/historial?${qs}`)
+  },
+  analisis: ({ dias = 30, fecha_inicio, fecha_fin } = {}) => {
+    const qs = new URLSearchParams()
+    if (fecha_inicio && fecha_fin) { qs.set('fecha_inicio', fecha_inicio); qs.set('fecha_fin_p', fecha_fin) }
+    else qs.set('dias', dias)
+    return api.get(`/tft/stats/analisis?${qs}`)
+  },
+}
+
 export const waitlist = {
   register: (data) => api.post('/waitlist', data),
 }

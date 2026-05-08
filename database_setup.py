@@ -527,6 +527,17 @@ CREATE INDEX IF NOT EXISTS idx_notas_relacion         ON notas_profesional(relac
 
 # Migración incremental: añade columnas a usuarios_app si no existen aún
 MIGRACIONES = """
+-- TFT: columnas en partidas
+ALTER TABLE partidas ADD COLUMN IF NOT EXISTS juego     VARCHAR(10) DEFAULT 'lol';
+ALTER TABLE partidas ADD COLUMN IF NOT EXISTS placement INT;
+ALTER TABLE partidas ADD COLUMN IF NOT EXISTS top4      BOOLEAN;
+CREATE INDEX IF NOT EXISTS idx_partidas_juego ON partidas(puuid, juego, fecha);
+
+-- TFT: límites separados en objetivos
+ALTER TABLE objetivos ADD COLUMN IF NOT EXISTS limite_horas_dia_tft     NUMERIC(4,2) DEFAULT 1.5;
+ALTER TABLE objetivos ADD COLUMN IF NOT EXISTS limite_horas_semana_tft  NUMERIC(5,2) DEFAULT 8.0;
+ALTER TABLE objetivos ADD COLUMN IF NOT EXISTS alerta_al_porcentaje_tft INT DEFAULT 80;
+
 ALTER TABLE usuarios_app      ADD COLUMN IF NOT EXISTS rol           VARCHAR(20)  DEFAULT 'jugador';
 ALTER TABLE usuarios_app      ADD COLUMN IF NOT EXISTS es_paciente   BOOLEAN      DEFAULT FALSE;
 ALTER TABLE usuarios_app      ADD COLUMN IF NOT EXISTS nombre_real   VARCHAR(100);

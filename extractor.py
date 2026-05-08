@@ -316,6 +316,9 @@ def api_get(url, reintentos=3):
  
             if r.status_code == 404:
                 return None  # jugador/partida no encontrado
+
+            if r.status_code == 403:
+                raise PermissionError(f"403 Forbidden: la API key no tiene acceso a {url.split('riotgames.com')[1].split('?')[0]}")
  
             r.raise_for_status()
             return r.json()
@@ -669,8 +672,17 @@ def sync_usuario(usuario):
         actualizar_sync_usuario(uid)
  
         horas_nuevas = round(sum(p["duracion_min"] for p in partidas_nuevas) / 60, 2)
-        print(f"     💾 {insertadas} partidas guardadas ({horas_nuevas}h de juego)")
- 
+        print(f"     💾 {insertadas} partidas LoL guardadas ({horas_nuevas}h de juego)")
+
+        # ── 7. TFT sync ───────────────────────────────────────────
+        try:
+            sync_tft_usuario(usuario)
+        except PermissionError as e_tft:
+            print(f"     ℹ️  TFT desactivado: {e_tft}")
+            print(f"     ℹ️  Activa el acceso TFT en developer.riotgames.com para sincronizar partidas TFT.")
+        except Exception as e_tft:
+            print(f"     ⚠️  Error en TFT sync: {e_tft}")
+
         return insertadas
  
     except Exception as e:
@@ -678,12 +690,167 @@ def sync_usuario(usuario):
         if sync_id:
             log_sync(None, game_name, estado="error", error=str(e), sync_id=sync_id)
         return 0
- 
- 
+
+
+# ══════════════════════════════════════════════════════════════
+#  TFT — EXTRACCIÓN
+# ══════════════════════════════════════════════════════════════
+
+TFT_QUEUE_NOMBRES = {
+    1100: "Ranked TFT",
+    1090: "Normal TFT",
+    1130: "Hyper Roll",
+    1160: "Double Up",
+    1400: "TFT Especial",
+}
+
+
+def get_tft_match_ids(puuid, routing, fecha_inicio, fecha_fin, existentes=None):
+    """IDs de partidas TFT paginando por ventanas de tiempo."""
+    if existentes is None:
+        existentes = set()
+    todos_ids = []
+    cursor    = fecha_inicio
+    while cursor < fecha_fin:
+        ventana_fin = min(cursor + timedelta(days=DIAS_VENTANA_PAGINACION), fecha_fin)
+        ts_inicio_v = int(datetime.combine(cursor, datetime.min.time()).timestamp())
+        ts_fin_v    = int(datetime.combine(ventana_fin, datetime.max.time()).timestamp())
+        print(f"       📆 TFT {cursor} → {ventana_fin}", end="", flush=True)
+        start = 0; ids_ventana = []
+        while True:
+            time.sleep(SLEEP_ENTRE_REQUESTS)
+            url    = (f"https://{routing}.api.riotgames.com/tft/match/v1/matches/by-puuid/{puuid}/ids"
+                      f"?start={start}&count={MAX_PARTIDAS_POR_PAGINA}"
+                      f"&startTime={ts_inicio_v}&endTime={ts_fin_v}")
+            pagina = api_get(url) or []
+            nuevos = [m for m in pagina if m not in existentes and m not in ids_ventana]
+            ids_ventana.extend(nuevos)
+            if len(pagina) < MAX_PARTIDAS_POR_PAGINA:
+                break
+            start += MAX_PARTIDAS_POR_PAGINA
+        print(f" → {len(ids_ventana)}")
+        todos_ids.extend(ids_ventana)
+        cursor = ventana_fin + timedelta(days=1)
+    return todos_ids
+
+
+def get_tft_match(match_id, routing):
+    url = f"https://{routing}.api.riotgames.com/tft/match/v1/matches/{match_id}"
+    return api_get(url)
+
+
+def extraer_stats_tft(match, puuid):
+    """Extrae los campos relevantes de una partida TFT."""
+    info         = match.get("info", {})
+    participants = info.get("participants", [])
+    p = next((x for x in participants if x.get("puuid") == puuid), None)
+    if not p:
+        return None
+    ts_inicio    = info.get("game_datetime", 0) / 1000
+    duracion_seg = int(info.get("game_length", 0))
+    duracion_min = round(duracion_seg / 60, 2)
+    dt_inicio    = datetime.fromtimestamp(ts_inicio)
+    placement    = int(p.get("placement", 8))
+    top4         = placement <= 4
+    queue_id     = info.get("queue_id", 0)
+    return {
+        "match_id":    match["metadata"]["match_id"],
+        "puuid":       puuid,
+        "fecha":       dt_inicio.strftime("%Y-%m-%d"),
+        "hora_inicio": dt_inicio.strftime("%H:%M:%S"),
+        "duracion_min":duracion_min,
+        "duracion_seg":duracion_seg,
+        "modo":        TFT_QUEUE_NOMBRES.get(queue_id, "TFT"),
+        "queue_id":    queue_id,
+        "parche":      info.get("game_version", "")[:10],
+        "placement":   placement,
+        "top4":        top4,
+        "resultado":   "Top4" if top4 else "Bot4",
+        "nivel_tft":   int(p.get("level", 0)),
+    }
+
+
+def insertar_partidas_tft(partidas):
+    """Inserta partidas TFT en la tabla `partidas`."""
+    if not partidas:
+        return 0
+    sql = """
+    INSERT INTO partidas (
+        match_id, puuid, fecha, hora_inicio, duracion_min, duracion_seg,
+        modo, queue_id, parche, resultado, juego, placement, top4,
+        campeon, kills, deaths, assists, kda, rendicion, apto_para_progresion
+    ) VALUES %s ON CONFLICT (match_id) DO NOTHING
+    """
+    rows = [(
+        p["match_id"], p["puuid"], p["fecha"], p["hora_inicio"],
+        p["duracion_min"], p["duracion_seg"],
+        p["modo"], p["queue_id"], p["parche"], p["resultado"],
+        "tft", p["placement"], p["top4"],
+        f"TFT Lvl {p['nivel_tft']}",
+        0, 0, 0, 0.0, False, True,
+    ) for p in partidas]
+    with get_db() as c:
+        execute_values(c.cursor(), sql, rows)
+        c.commit()
+    return len(rows)
+
+
+def get_tft_ids_en_db(puuid):
+    with get_db() as c:
+        cur = c.cursor()
+        cur.execute("SELECT match_id FROM partidas WHERE puuid=%s AND juego='tft'", (puuid,))
+        return {r[0] for r in cur.fetchall()}
+
+
+def get_tft_fecha_ultima(puuid):
+    with get_db() as c:
+        cur = c.cursor()
+        cur.execute("SELECT MAX(fecha) FROM partidas WHERE puuid=%s AND juego='tft'", (puuid,))
+        return cur.fetchone()[0]
+
+
+def sync_tft_usuario(usuario):
+    """Sincroniza partidas TFT de un usuario. Devuelve número de partidas nuevas."""
+    puuid      = usuario.get("puuid")
+    game_name  = usuario["riot_game_name"]
+    region_key = (usuario.get("region") or "EUW").upper()
+    _region, routing = REGION_MAP.get(region_key, ("euw1", "europe"))
+    if not puuid:
+        return 0
+
+    print(f"     🎲 TFT sync...")
+    ultima = get_tft_fecha_ultima(puuid)
+    fecha_inicio = (ultima - timedelta(days=1)) if ultima else (date.today() - timedelta(days=DIAS_ATRAS_DEFAULT))
+    existentes   = get_tft_ids_en_db(puuid)
+    nuevos_ids   = get_tft_match_ids(puuid, routing, fecha_inicio, date.today(), existentes)
+    if not nuevos_ids:
+        return 0
+
+    partidas_nuevas = []
+    for i, match_id in enumerate(nuevos_ids, 1):
+        time.sleep(SLEEP_ENTRE_REQUESTS)
+        try:
+            match = get_tft_match(match_id, routing)
+            if not match:
+                continue
+            stats = extraer_stats_tft(match, puuid)
+            if stats:
+                partidas_nuevas.append(stats)
+                icono = "🥇" if stats["placement"] == 1 else ("🏆" if stats["top4"] else "💀")
+                print(f"     [{i:2}/{len(nuevos_ids)}] {icono} {stats['modo']:<14} "
+                      f"#{stats['placement']} | {stats['duracion_min']}min | {stats['fecha']}")
+        except Exception as e:
+            print(f"     [{i:2}/{len(nuevos_ids)}] ⚠️  Error TFT {match_id}: {e}")
+
+    insertadas = insertar_partidas_tft(partidas_nuevas)
+    print(f"     💾 {insertadas} partidas TFT guardadas")
+    return insertadas
+
+
 # ══════════════════════════════════════════════════════════════
 #  SYNC COMPLETO — TODOS LOS USUARIOS
 # ══════════════════════════════════════════════════════════════
- 
+
 def sync_todos():
     """Sincroniza todos los usuarios activos de la app."""
     print("═" * 60)

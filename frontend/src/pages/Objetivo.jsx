@@ -11,11 +11,14 @@ export default function Objetivo() {
   useEffect(() => {
     objApi.get()
       .then(r => setForm({
-        limite_horas_dia:    parseFloat(r.data.limite_horas_dia),
-        limite_horas_semana: parseFloat(r.data.limite_horas_semana),
-        alerta_porcentaje:   r.data.alerta_al_porcentaje,
-        resumen_nocturno:    r.data.resumen_nocturno,
-        hora_resumen:        r.data.hora_resumen?.slice(0, 5) || '23:00',
+        limite_horas_dia:         parseFloat(r.data.limite_horas_dia),
+        limite_horas_semana:      parseFloat(r.data.limite_horas_semana),
+        alerta_porcentaje:        r.data.alerta_al_porcentaje,
+        resumen_nocturno:         r.data.resumen_nocturno,
+        hora_resumen:             r.data.hora_resumen?.slice(0, 5) || '23:00',
+        limite_horas_dia_tft:     parseFloat(r.data.limite_horas_dia_tft    || 1.5),
+        limite_horas_semana_tft:  parseFloat(r.data.limite_horas_semana_tft || 8.0),
+        alerta_porcentaje_tft:    r.data.alerta_al_porcentaje_tft || 80,
       }))
       .catch(() => setLoadError('No se pudo cargar el objetivo. Recarga la página.'))
       .finally(() => setLoading(false))
@@ -26,11 +29,14 @@ export default function Objetivo() {
     setSaving(true); setMsg({ type: '', text: '' })
     try {
       await objApi.update({
-        limite_horas_dia:    form.limite_horas_dia,
-        limite_horas_semana: form.limite_horas_semana,
-        alerta_porcentaje:   form.alerta_porcentaje,
-        resumen_nocturno:    form.resumen_nocturno,
-        hora_resumen:        form.hora_resumen,
+        limite_horas_dia:         form.limite_horas_dia,
+        limite_horas_semana:      form.limite_horas_semana,
+        alerta_porcentaje:        form.alerta_porcentaje,
+        resumen_nocturno:         form.resumen_nocturno,
+        hora_resumen:             form.hora_resumen,
+        limite_horas_dia_tft:     form.limite_horas_dia_tft,
+        limite_horas_semana_tft:  form.limite_horas_semana_tft,
+        alerta_porcentaje_tft:    form.alerta_porcentaje_tft,
       })
       setMsg({ type: 'ok', text: '¡Objetivo actualizado correctamente!' })
     } catch (err) {
@@ -101,6 +107,38 @@ export default function Objetivo() {
                 <option key={v} value={v}>{v}% — cuando lleve {fmt(form.limite_horas_dia * v / 100)}</option>
               )}
             </select>
+          </div>
+
+          <div className="divider" />
+
+          {/* Límites TFT */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+            <span style={{ color: '#c89b3c', fontSize: 16 }}>♟</span>
+            <p style={{ fontSize: 13, fontWeight: 500 }}>Límites TFT (Teamfight Tactics)</p>
+          </div>
+          <div className="input-row">
+            <div className="input-group">
+              <label>Límite diario TFT (horas)</label>
+              <input
+                type="number" min="0.5" max="24" step="0.5"
+                value={form.limite_horas_dia_tft}
+                onChange={e => setForm({ ...form, limite_horas_dia_tft: parseFloat(e.target.value) })}
+              />
+              <p style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
+                = {Math.floor(form.limite_horas_dia_tft)}h {Math.round((form.limite_horas_dia_tft % 1) * 60)}min al día
+              </p>
+            </div>
+            <div className="input-group">
+              <label>Límite semanal TFT (horas)</label>
+              <input
+                type="number" min="1" max="168" step="0.5"
+                value={form.limite_horas_semana_tft}
+                onChange={e => setForm({ ...form, limite_horas_semana_tft: parseFloat(e.target.value) })}
+              />
+              <p style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
+                = {Math.round(form.limite_horas_semana_tft / 7 * 10) / 10}h de media al día
+              </p>
+            </div>
           </div>
 
           <div className="divider" />

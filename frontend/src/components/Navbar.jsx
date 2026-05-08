@@ -1,13 +1,31 @@
 import { NavLink, useNavigate } from 'react-router-dom'
 import { auth } from '../api'
 
-const links = [
+const LOL_LINKS = [
   { to: '/dashboard', label: 'Dashboard', icon: '▦' },
   { to: '/historial', label: 'Historial', icon: '◷' },
   { to: '/analisis',  label: 'Análisis',  icon: '◈' },
-  { to: '/objetivo',  label: 'Objetivo',  icon: '◎' },
-  { to: '/cuenta',    label: 'Cuenta',    icon: '◯' },
 ]
+
+const TFT_LINKS = [
+  { to: '/tft/dashboard', label: 'Dashboard', icon: '▦' },
+  { to: '/tft/historial', label: 'Historial',  icon: '◷' },
+]
+
+const BOTTOM_LINKS = [
+  { to: '/objetivo', label: 'Objetivo', icon: '◎' },
+  { to: '/cuenta',   label: 'Cuenta',   icon: '◯' },
+]
+
+const navStyle = (isActive, accentColor = 'var(--accent)') => ({
+  display: 'flex', alignItems: 'center', gap: '10px',
+  padding: '10px 14px', borderRadius: 'var(--radius)', marginBottom: '4px',
+  fontSize: '14px', fontWeight: isActive ? '500' : '400',
+  color: isActive ? 'var(--text)' : 'var(--muted)',
+  background: isActive ? 'var(--bg3)' : 'transparent',
+  transition: 'all .15s',
+  textDecoration: 'none',
+})
 
 export default function Navbar() {
   const navigate = useNavigate()
@@ -47,23 +65,32 @@ export default function Navbar() {
       </div>
 
       {/* Links */}
-      <div style={{ flex: 1, padding: '16px 12px' }}>
-        {links.map(({ to, label, icon }) => (
-          <NavLink key={to} to={to} style={({ isActive }) => ({
-            display:      'flex',
-            alignItems:   'center',
-            gap:          '10px',
-            padding:      '10px 14px',
-            borderRadius: 'var(--radius)',
-            marginBottom: '4px',
-            fontSize:     '14px',
-            fontWeight:   isActive ? '500' : '400',
-            color:        isActive ? 'var(--text)' : 'var(--muted)',
-            background:   isActive ? 'var(--bg3)' : 'transparent',
-            transition:   'all .15s',
-          })}>
-            <span style={{ fontSize: '16px' }}>{icon}</span>
-            {label}
+      <div style={{ flex: 1, padding: '16px 12px', overflowY: 'auto' }}>
+        {/* LoL */}
+        <div style={{ fontSize: 10, color: 'var(--muted)', letterSpacing: 1.5, textTransform: 'uppercase', fontWeight: 600, padding: '4px 14px 8px', marginTop: 4 }}>
+          League of Legends
+        </div>
+        {LOL_LINKS.map(({ to, label, icon }) => (
+          <NavLink key={to} to={to} style={({ isActive }) => navStyle(isActive)}>
+            <span style={{ fontSize: '16px' }}>{icon}</span>{label}
+          </NavLink>
+        ))}
+
+        {/* TFT */}
+        <div style={{ fontSize: 10, color: '#c89b3c', letterSpacing: 1.5, textTransform: 'uppercase', fontWeight: 600, padding: '16px 14px 8px' }}>
+          ♟ TFT
+        </div>
+        {TFT_LINKS.map(({ to, label, icon }) => (
+          <NavLink key={to} to={to} style={({ isActive }) => navStyle(isActive, '#c89b3c')}>
+            <span style={{ fontSize: '16px' }}>{icon}</span>{label}
+          </NavLink>
+        ))}
+
+        {/* General */}
+        <div style={{ height: 1, background: 'var(--border)', margin: '14px 0 10px' }} />
+        {BOTTOM_LINKS.map(({ to, label, icon }) => (
+          <NavLink key={to} to={to} style={({ isActive }) => navStyle(isActive)}>
+            <span style={{ fontSize: '16px' }}>{icon}</span>{label}
           </NavLink>
         ))}
       </div>

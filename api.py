@@ -286,11 +286,15 @@ class RegistroRequest(BaseModel):
  
  
 class ObjetivoUpdate(BaseModel):
-    limite_horas_dia:    Optional[float] = None
-    limite_horas_semana: Optional[float] = None
-    alerta_porcentaje:   Optional[int]   = None
-    resumen_nocturno:    Optional[bool]  = None
-    hora_resumen:        Optional[str]   = None   # formato "HH:MM"
+    limite_horas_dia:         Optional[float] = None
+    limite_horas_semana:      Optional[float] = None
+    alerta_porcentaje:        Optional[int]   = None
+    resumen_nocturno:         Optional[bool]  = None
+    hora_resumen:             Optional[str]   = None
+    # TFT
+    limite_horas_dia_tft:     Optional[float] = None
+    limite_horas_semana_tft:  Optional[float] = None
+    alerta_porcentaje_tft:    Optional[int]   = None
  
  
 class CambioPasswordRequest(BaseModel):
@@ -988,6 +992,333 @@ def historial(
  
  
 # ══════════════════════════════════════════════════════════════
+#  ENDPOINTS — TFT
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/tft/dashboard", summary="Dashboard TFT del usuario")
+def tft_dashboard(usuario = Depends(get_usuario_actual), db = Depends(get_db)):
+    puuid = usuario.get("puuid")
+    uid   = usuario["id"]
+    if not puuid:
+        return {"sincronizado": False}
+
+    cur   = db.cursor()
+    lunes = date.today() - timedelta(days=date.today().weekday())
+
+    cur.execute("""
+        SELECT
+            COALESCE(ROUND(SUM(duracion_min)::numeric/60,2),0)  AS horas_hoy,
+            COALESCE(COUNT(*),0)                                 AS partidas_hoy,
+            COALESCE(ROUND(AVG(placement)::numeric,1),0)         AS avg_placement_hoy
+        FROM partidas
+        WHERE puuid=%s AND fecha=CURRENT_DATE AND juego='tft'
+    """, (puuid,))
+    hoy = dict(cur.fetchone())
+
+    cur.execute("""
+        SELECT COALESCE(ROUND(SUM(duracion_min)::numeric/60,2),0) AS horas_semana
+        FROM partidas
+        WHERE puuid=%s AND fecha>=%s AND fecha<=CURRENT_DATE AND juego='tft'
+    """, (puuid, lunes))
+    horas_semana = float(cur.fetchone()["horas_semana"])
+
+    cur.execute("""
+        SELECT
+            limite_horas_dia_tft    AS limite_dia,
+            limite_horas_semana_tft AS limite_semana,
+            alerta_al_porcentaje_tft AS alerta_pct
+        FROM objetivos WHERE usuario_id=%s AND activo=TRUE
+    """, (uid,))
+    obj      = dict(cur.fetchone() or {})
+    limite_d = float(obj.get("limite_dia") or 1.5)
+    limite_s = float(obj.get("limite_semana") or 8.0)
+    horas_hoy= float(hoy["horas_hoy"])
+    pct_dia  = round(horas_hoy / limite_d * 100, 1) if limite_d else 0
+
+    # Últimas 10 partidas TFT
+    cur.execute("""
+        SELECT campeon, modo, resultado, placement, top4, kda, duracion_min, fecha, hora_inicio
+        FROM partidas WHERE puuid=%s AND juego='tft'
+        ORDER BY fecha DESC, hora_inicio DESC LIMIT 10
+    """, (puuid,))
+    ultimas = [dict(r) for r in cur.fetchall()]
+
+    # Avg placement últimas 20
+    cur.execute("""
+        SELECT
+            COALESCE(ROUND(AVG(placement)::numeric,2),0)                   AS avg_placement,
+            COALESCE(ROUND(SUM(CASE WHEN top4 THEN 1 ELSE 0 END)::numeric
+                / NULLIF(COUNT(*),0)*100,1),0)                             AS top4_rate,
+            COUNT(*)                                                        AS total
+        FROM partidas WHERE puuid=%s AND juego='tft'
+        ORDER BY fecha DESC LIMIT 20
+    """, (puuid,))  # NOTE: subquery needed — simplify with window
+    # Use simpler subquery approach
+    cur.execute("""
+        SELECT
+            COALESCE(ROUND(AVG(placement)::numeric,2),0) AS avg_placement,
+            COALESCE(ROUND(SUM(CASE WHEN top4 THEN 1 ELSE 0 END)::numeric/NULLIF(COUNT(*),0)*100,1),0) AS top4_rate,
+            COUNT(*) AS total
+        FROM (SELECT placement, top4 FROM partidas WHERE puuid=%s AND juego='tft'
+              ORDER BY fecha DESC, hora_inicio DESC LIMIT 20) sub
+    """, (puuid,))
+    perf = dict(cur.fetchone())
+
+    # Ranked TFT
+    cur.execute("""
+        SELECT tier, division, lp, victorias, derrotas
+        FROM ranked_info WHERE puuid=%s AND queue_type='RANKED_TFT'
+    """, (puuid,))
+    ranked = dict(cur.fetchone() or {})
+
+    return {
+        "sincronizado": True,
+        "hoy": {
+            "horas":    horas_hoy,
+            "partidas": int(hoy["partidas_hoy"]),
+            "avg_placement": float(hoy["avg_placement_hoy"]),
+        },
+        "semana": {
+            "horas":      horas_semana,
+            "porcentaje": round(horas_semana / limite_s * 100, 1) if limite_s else 0,
+        },
+        "objetivo": {
+            "limite_dia":     limite_d,
+            "limite_semana":  limite_s,
+            "porcentaje_dia": pct_dia,
+        },
+        "rendimiento": {
+            "avg_placement": float(perf["avg_placement"]),
+            "top4_rate":     float(perf["top4_rate"]),
+            "total_partidas":int(perf["total"]),
+        },
+        "ranked": ranked,
+        "ultimas_partidas": [
+            {
+                "modo":       r["modo"],
+                "resultado":  r["resultado"],
+                "placement":  r["placement"],
+                "top4":       r["top4"],
+                "duracion_min": float(r["duracion_min"]),
+                "fecha":      str(r["fecha"]),
+                "hora":       str(r["hora_inicio"])[:5],
+            }
+            for r in ultimas
+        ],
+    }
+
+
+@app.get("/tft/historial", summary="Historial de partidas TFT")
+def tft_historial(
+    dias:         int          = 30,
+    limit:        int          = 50,
+    offset:       int          = 0,
+    fecha_inicio: Optional[str] = None,
+    fecha_fin:    Optional[str] = None,
+    usuario = Depends(get_usuario_actual),
+    db      = Depends(get_db),
+):
+    if fecha_inicio and fecha_fin:
+        try:
+            f_ini = date.fromisoformat(fecha_inicio)
+            f_fin = date.fromisoformat(fecha_fin)
+        except ValueError:
+            raise HTTPException(400, detail="Formato de fecha inválido (YYYY-MM-DD)")
+    else:
+        f_ini = date.today() - timedelta(days=dias)
+        f_fin = date.today()
+
+    puuid = usuario.get("puuid")
+    if not puuid:
+        return {"partidas": [], "total": 0, "resumen": {}}
+
+    cur   = db.cursor()
+    rango = (puuid, f_ini, f_fin)
+
+    cur.execute("SELECT COUNT(*) FROM partidas WHERE puuid=%s AND fecha>=%s AND fecha<=%s AND juego='tft'", rango)
+    total = cur.fetchone()["count"]
+
+    cur.execute("""
+        SELECT modo, resultado, placement, top4, duracion_min, fecha, hora_inicio, parche
+        FROM partidas
+        WHERE puuid=%s AND fecha>=%s AND fecha<=%s AND juego='tft'
+        ORDER BY fecha DESC, hora_inicio DESC
+        LIMIT %s OFFSET %s
+    """, (*rango, limit, offset))
+    partidas = [dict(r) for r in cur.fetchall()]
+
+    cur.execute("""
+        SELECT
+            COUNT(*)                                                                          AS total,
+            COALESCE(ROUND(SUM(duracion_min)::numeric/60,2),0)                               AS horas_total,
+            COALESCE(ROUND(AVG(placement)::numeric,2),0)                                     AS avg_placement,
+            COALESCE(ROUND(SUM(CASE WHEN top4 THEN 1 ELSE 0 END)::numeric/NULLIF(COUNT(*),0)*100,1),0) AS top4_rate,
+            SUM(CASE WHEN placement=1 THEN 1 ELSE 0 END)                                     AS primeros
+        FROM partidas WHERE puuid=%s AND fecha>=%s AND fecha<=%s AND juego='tft'
+    """, rango)
+    resumen = dict(cur.fetchone())
+
+    return {
+        "total":   total,
+        "limit":   limit,
+        "offset":  offset,
+        "resumen": {
+            "total_partidas": int(resumen["total"] or 0),
+            "horas_total":    float(resumen["horas_total"] or 0),
+            "avg_placement":  float(resumen["avg_placement"] or 0),
+            "top4_rate":      float(resumen["top4_rate"] or 0),
+            "primeros":       int(resumen["primeros"] or 0),
+        },
+        "partidas": [
+            {
+                "modo":        r["modo"],
+                "resultado":   r["resultado"],
+                "placement":   r["placement"],
+                "top4":        r["top4"],
+                "duracion_min":float(r["duracion_min"]),
+                "fecha":       str(r["fecha"]),
+                "hora":        str(r["hora_inicio"])[:5],
+                "parche":      r["parche"],
+            }
+            for r in partidas
+        ],
+    }
+
+
+@app.get("/tft/stats/analisis", summary="Análisis TFT: patrones de comportamiento y rendimiento")
+def tft_analisis(
+    dias:         int          = 30,
+    fecha_inicio: Optional[str] = None,
+    fecha_fin_p:  Optional[str] = None,
+    usuario = Depends(get_usuario_actual),
+    db      = Depends(get_db),
+):
+    puuid = usuario.get("puuid")
+    if not puuid:
+        return {}
+    cur = db.cursor()
+
+    if fecha_inicio and fecha_fin_p:
+        try:
+            f_ini = date.fromisoformat(fecha_inicio)
+            f_fin = date.fromisoformat(fecha_fin_p)
+        except ValueError:
+            raise HTTPException(400, "Formato de fecha inválido")
+    else:
+        f_ini = date.today() - timedelta(days=dias)
+        f_fin = date.today()
+
+    params = {"puuid": puuid, "f_ini": f_ini, "f_fin": f_fin}
+
+    # Estadísticas globales
+    cur.execute("""
+        SELECT
+            COUNT(*)                                                                          AS total,
+            COALESCE(ROUND(AVG(placement)::numeric,2),0)                                     AS avg_placement,
+            COALESCE(ROUND(SUM(CASE WHEN top4 THEN 1 ELSE 0 END)::numeric/NULLIF(COUNT(*),0)*100,1),0) AS top4_rate,
+            COALESCE(ROUND(SUM(CASE WHEN placement=1 THEN 1 ELSE 0 END)::numeric/NULLIF(COUNT(*),0)*100,1),0) AS first_rate,
+            COALESCE(ROUND(SUM(duracion_min)::numeric/60,2),0)                               AS horas_total,
+            COUNT(DISTINCT fecha)                                                             AS dias_jugados,
+            SUM(CASE WHEN EXTRACT(HOUR FROM hora_inicio)>=23 OR EXTRACT(HOUR FROM hora_inicio)<6
+                     THEN 1 ELSE 0 END)                                                       AS partidas_nocturnas
+        FROM partidas
+        WHERE puuid=%(puuid)s AND fecha>=%(f_ini)s AND fecha<=%(f_fin)s AND juego='tft'
+    """, params)
+    stats = dict(cur.fetchone())
+
+    # Rendimiento por modo
+    cur.execute("""
+        SELECT modo, COUNT(*) AS partidas,
+               ROUND(AVG(placement)::numeric,2) AS avg_placement,
+               ROUND(SUM(CASE WHEN top4 THEN 1 ELSE 0 END)::numeric/NULLIF(COUNT(*),0)*100,0) AS top4_rate
+        FROM partidas
+        WHERE puuid=%(puuid)s AND fecha>=%(f_ini)s AND fecha<=%(f_fin)s AND juego='tft'
+        GROUP BY modo ORDER BY partidas DESC
+    """, params)
+    por_modo = [dict(r) for r in cur.fetchall()]
+
+    # Rendimiento por franja horaria
+    cur.execute("""
+        SELECT EXTRACT(HOUR FROM hora_inicio)::int AS hora,
+               COUNT(*) AS total,
+               ROUND(AVG(placement)::numeric,2) AS avg_placement,
+               ROUND(SUM(CASE WHEN top4 THEN 1 ELSE 0 END)::numeric/NULLIF(COUNT(*),0)*100,0) AS top4_rate
+        FROM partidas
+        WHERE puuid=%(puuid)s AND fecha>=%(f_ini)s AND fecha<=%(f_fin)s AND juego='tft'
+        GROUP BY hora ORDER BY hora
+    """, params)
+    por_hora = [dict(r) for r in cur.fetchall()]
+
+    # Últimas 20 partidas para tendencia de placement
+    cur.execute("""
+        SELECT fecha, placement, top4, modo
+        FROM partidas
+        WHERE puuid=%(puuid)s AND fecha>=%(f_ini)s AND fecha<=%(f_fin)s AND juego='tft'
+        ORDER BY fecha DESC, hora_inicio DESC LIMIT 20
+    """, params)
+    tendencia = [dict(r) for r in cur.fetchall()]
+
+    total     = int(stats["total"] or 0)
+    pct_noct  = round(int(stats["partidas_nocturnas"] or 0) / total * 100, 1) if total else 0
+    avg_pl    = float(stats["avg_placement"] or 0)
+    top4_rate = float(stats["top4_rate"] or 0)
+
+    # Señales de comportamiento TFT
+    señales = []
+    if avg_pl > 5.5 and total >= 10:
+        señales.append({"tipo": "rendimiento", "nivel": "danger",
+            "mensaje": f"Tu placement medio es {avg_pl:.1f}. Encadenar Bot4s es señal de tilt — considera hacer pausas entre partidas."})
+    elif avg_pl > 4.5 and total >= 10:
+        señales.append({"tipo": "rendimiento", "nivel": "warning",
+            "mensaje": f"Placement medio de {avg_pl:.1f}. Estás más en Bot4 que en Top4. Un descanso puede mejorar tu lectura del meta."})
+    if pct_noct > 25:
+        señales.append({"tipo": "madrugada", "nivel": "warning",
+            "mensaje": f"El {pct_noct:.0f}% de tus partidas TFT son de madrugada. La fatiga afecta al tempo de TFT especialmente."})
+
+    return {
+        "total_partidas":     total,
+        "avg_placement":      avg_pl,
+        "top4_rate":          top4_rate,
+        "first_rate":         float(stats["first_rate"] or 0),
+        "horas_total":        float(stats["horas_total"] or 0),
+        "dias_jugados":       int(stats["dias_jugados"] or 0),
+        "pct_nocturno":       pct_noct,
+        "por_modo":           [{"modo": r["modo"], "partidas": int(r["partidas"]),
+                                "avg_placement": float(r["avg_placement"] or 0),
+                                "top4_rate": float(r["top4_rate"] or 0)} for r in por_modo],
+        "por_hora":           [{"hora": r["hora"], "total": int(r["total"]),
+                                "avg_placement": float(r["avg_placement"] or 0),
+                                "top4_rate": float(r["top4_rate"] or 0)} for r in por_hora],
+        "tendencia_reciente": [{"fecha": str(r["fecha"]), "placement": r["placement"],
+                                "top4": r["top4"], "modo": r["modo"]} for r in tendencia],
+        "señales_comportamiento": señales,
+    }
+
+
+# Proxies para el portal profesional
+@app.get("/pro/pacientes/{paciente_id}/tft/dashboard")
+def pro_tft_dashboard(paciente_id: int, ctx = Depends(get_profesional_actual), db = Depends(get_db)):
+    cur = db.cursor()
+    _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+    cur.execute("SELECT * FROM usuarios_app WHERE id=%s AND activo=TRUE", (paciente_id,))
+    paciente = cur.fetchone()
+    if not paciente: raise HTTPException(404)
+    return tft_dashboard(usuario=dict(paciente), db=db)
+
+@app.get("/pro/pacientes/{paciente_id}/tft/historial")
+def pro_tft_historial(paciente_id: int, dias: int = 30, limit: int = 50, offset: int = 0,
+    fecha_inicio: Optional[str] = None, fecha_fin: Optional[str] = None,
+    ctx = Depends(get_profesional_actual), db = Depends(get_db)):
+    cur = db.cursor()
+    _verificar_acceso_paciente(ctx["profesional"]["id"], paciente_id, cur)
+    cur.execute("SELECT * FROM usuarios_app WHERE id=%s AND activo=TRUE", (paciente_id,))
+    paciente = cur.fetchone()
+    if not paciente: raise HTTPException(404)
+    return tft_historial(dias=dias, limit=limit, offset=offset,
+        fecha_inicio=fecha_inicio, fecha_fin=fecha_fin, usuario=dict(paciente), db=db)
+
+
+# ══════════════════════════════════════════════════════════════
 #  ENDPOINTS — OBJETIVO
 # ══════════════════════════════════════════════════════════════
  
@@ -997,7 +1328,8 @@ def get_objetivo(usuario = Depends(get_usuario_actual), db = Depends(get_db)):
     cur.execute("""
         SELECT id, limite_horas_dia, limite_horas_semana,
                dias_descanso_semana, alerta_al_porcentaje,
-               resumen_nocturno, hora_resumen, activo_desde
+               resumen_nocturno, hora_resumen, activo_desde,
+               limite_horas_dia_tft, limite_horas_semana_tft, alerta_al_porcentaje_tft
         FROM objetivos
         WHERE usuario_id = %s AND activo = TRUE
     """, (usuario["id"],))
@@ -1024,11 +1356,14 @@ def update_objetivo(
  
     # Actualizar solo los campos que se envían
     campos = {}
-    if req.limite_horas_dia    is not None: campos["limite_horas_dia"]    = req.limite_horas_dia
-    if req.limite_horas_semana is not None: campos["limite_horas_semana"] = req.limite_horas_semana
-    if req.alerta_porcentaje   is not None: campos["alerta_al_porcentaje"]= req.alerta_porcentaje
-    if req.resumen_nocturno    is not None: campos["resumen_nocturno"]    = req.resumen_nocturno
-    if req.hora_resumen        is not None: campos["hora_resumen"]        = req.hora_resumen
+    if req.limite_horas_dia        is not None: campos["limite_horas_dia"]         = req.limite_horas_dia
+    if req.limite_horas_semana     is not None: campos["limite_horas_semana"]      = req.limite_horas_semana
+    if req.alerta_porcentaje       is not None: campos["alerta_al_porcentaje"]     = req.alerta_porcentaje
+    if req.resumen_nocturno        is not None: campos["resumen_nocturno"]         = req.resumen_nocturno
+    if req.hora_resumen            is not None: campos["hora_resumen"]             = req.hora_resumen
+    if req.limite_horas_dia_tft    is not None: campos["limite_horas_dia_tft"]     = req.limite_horas_dia_tft
+    if req.limite_horas_semana_tft is not None: campos["limite_horas_semana_tft"]  = req.limite_horas_semana_tft
+    if req.alerta_porcentaje_tft   is not None: campos["alerta_al_porcentaje_tft"] = req.alerta_porcentaje_tft
  
     if not campos:
         return {"message": "No hay cambios que guardar"}

@@ -8,6 +8,8 @@ import Objetivo      from './pages/Objetivo'
 import Cuenta        from './pages/Cuenta'
 import Analisis      from './pages/Analisis'
 import Waitlist           from './pages/Waitlist'
+import TftDashboard      from './pages/TftDashboard'
+import TftHistorial      from './pages/TftHistorial'
 import InvitacionPro      from './pages/InvitacionPro'
 import ProLogin            from './pages/pro/ProLogin'
 import ProRegistro         from './pages/pro/ProRegistro'
@@ -57,6 +59,12 @@ export default function App() {
         }/>
         <Route path="/analisis" element={
           <ProtectedRoute><Shell><Analisis /></Shell></ProtectedRoute>
+        }/>
+        <Route path="/tft/dashboard" element={
+          <ProtectedRoute><Shell><TftDashboard /></Shell></ProtectedRoute>
+        }/>
+        <Route path="/tft/historial" element={
+          <ProtectedRoute><Shell><TftHistorial /></Shell></ProtectedRoute>
         }/>
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>
